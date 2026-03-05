@@ -1,0 +1,471 @@
+diff --git a/src/rp2040/boot_stage2/CMakeLists.txt b/src/rp2040/boot_stage2/CMakeLists.txt
+index 2798b36..eebfb60 100644
+--- a/src/rp2040/boot_stage2/CMakeLists.txt
++++ b/src/rp2040/boot_stage2/CMakeLists.txt
+@@ -49,7 +49,9 @@ function(pico_define_boot_stage2 NAME SOURCES)
+     if (PICO_C_COMPILER_IS_CLANG)
+         target_link_options(${NAME} PRIVATE "-nostdlib")
+     elseif (PICO_C_COMPILER_IS_GNU)
+-        target_link_options(${NAME} PRIVATE "--specs=nosys.specs")
++        if (PICO_CLIB STREQUAL "newlib")
++             target_link_options(${NAME} PRIVATE "--specs=nosys.specs")
++        endif()
+         target_link_options(${NAME} PRIVATE "-nostartfiles")
+     endif ()
+ 
+diff --git a/src/rp2350/boot_stage2/CMakeLists.txt b/src/rp2350/boot_stage2/CMakeLists.txt
+index fbf95b5..446ca12 100644
+--- a/src/rp2350/boot_stage2/CMakeLists.txt
++++ b/src/rp2350/boot_stage2/CMakeLists.txt
+@@ -49,7 +49,9 @@ function(pico_define_boot_stage2 NAME SOURCES)
+     if (PICO_C_COMPILER_IS_CLANG)
+         target_link_options(${NAME} PRIVATE "-nostdlib")
+     elseif (PICO_C_COMPILER_IS_GNU)
+-        target_link_options(${NAME} PRIVATE "--specs=nosys.specs")
++        if (PICO_CLIB STREQUAL "newlib")
++             target_link_options(${NAME} PRIVATE "--specs=nosys.specs")
++        endif()
+         target_link_options(${NAME} PRIVATE "-nostartfiles")
+     endif ()
+ 
+diff --git a/src/rp2_common/hardware_exception/exception_table_riscv.S b/src/rp2_common/hardware_exception/exception_table_riscv.S
+index 1bd24c9..332f2d9 100644
+--- a/src/rp2_common/hardware_exception/exception_table_riscv.S
++++ b/src/rp2_common/hardware_exception/exception_table_riscv.S
+@@ -11,7 +11,12 @@
+ .endm
+ 
+ // must be in RAM due to branches from vector table
+-.section .time_critical.hardware_exception
++// "ax": SHF_ALLOC + SHF_EXECINSTR — required for lld to treat this as a
++// loadable code section. Without explicit flags, Clang's RISC-V assembler
++// emits the section with no SHF_ALLOC, causing lld to use P=0 for all
++// PC-relative relocations (R_RISCV_JAL, R_RISCV_PCREL_*), producing
++// ~512 MB offsets. GNU as infers flags from context; lld does not.
++.section .time_critical.hardware_exception, "ax", %progbits
+ 
+ .p2align 2
+ .global __riscv_exception_table
+diff --git a/src/rp2_common/hardware_sync/include/hardware/sync.h b/src/rp2_common/hardware_sync/include/hardware/sync.h
+index 69b3e69..279e09d 100644
+--- a/src/rp2_common/hardware_sync/include/hardware/sync.h
++++ b/src/rp2_common/hardware_sync/include/hardware/sync.h
+@@ -14,6 +14,7 @@
+ #include "hardware/hazard3.h"
+ #endif
+ 
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -94,6 +95,8 @@ __force_inline static void __sev(void) {
+     pico_default_asm_volatile ("sev");
+ #endif
+ }
++#else
++void __sev(void);
+ #endif
+ 
+ /*! \brief Insert a WFE instruction in to the code path.
+@@ -110,6 +113,8 @@ __force_inline static void __wfe(void) {
+     pico_default_asm_volatile ("wfe");
+ #endif
+ }
++#else
++void __wfe(void);
+ #endif
+ 
+ /*! \brief Insert a WFI instruction in to the code path.
+@@ -363,8 +368,8 @@ bool spin_lock_is_claimed(uint lock_num);
+ #define remove_volatile_cast(t, x) (t)(x)
+ #define remove_volatile_cast_no_barrier(t, x) (t)(x)
+ #else
+-#define remove_volatile_cast(t, x) ({__compiler_memory_barrier(); Clang_Pragma("clang diagnostic push"); Clang_Pragma("clang diagnostic ignored \"-Wcast-qual\""); (t)(x); Clang_Pragma("clang diagnostic pop"); })
+-#define remove_volatile_cast_no_barrier(t, x) ({ Clang_Pragma("clang diagnostic push"); Clang_Pragma("clang diagnostic ignored \"-Wcast-qual\""); (t)(x); Clang_Pragma("clang diagnostic pop"); })
++#define remove_volatile_cast(t, x) ({__compiler_memory_barrier(); Clang_Pragma("clang diagnostic push"); Clang_Pragma("clang diagnostic ignored \"-Wcast-qual\""); __auto_type _rcv = (t)(x); Clang_Pragma("clang diagnostic pop"); _rcv; })
++#define remove_volatile_cast_no_barrier(t, x) ({ Clang_Pragma("clang diagnostic push"); Clang_Pragma("clang diagnostic ignored \"-Wcast-qual\""); __auto_type _rcv = (t)(x); Clang_Pragma("clang diagnostic pop"); _rcv; })
+ #endif
+ 
+ #ifdef __cplusplus
+diff --git a/src/rp2_common/pico_clib_interface/picolibc_interface.c b/src/rp2_common/pico_clib_interface/picolibc_interface.c
+index 63d7913..ca74e03 100644
+--- a/src/rp2_common/pico_clib_interface/picolibc_interface.c
++++ b/src/rp2_common/pico_clib_interface/picolibc_interface.c
+@@ -58,6 +58,12 @@ static FILE __stdio = FDEV_SETUP_STREAM(picolibc_putc,
+                                         picolibc_flush,
+                                         _FDEV_SETUP_RW);
+ 
++#ifdef __GNUCLIKE_PRAGMA_DIAGNOSTIC
++#pragma GCC diagnostic ignored "-Wpragmas"
++#pragma GCC diagnostic ignored "-Wunknown-warning-option"
++#pragma GCC diagnostic ignored "-Wredundant-decls"
++#endif
++
+ FILE *const stdin = &__stdio; __strong_reference(stdin, stdout); __strong_reference(stdin, stderr);
+ 
+ void __weak __assert_func(const char *file, int line, const char *func, const char *failedexpr) {
+@@ -151,4 +157,4 @@ PICO_RUNTIME_INIT_FUNC_PER_CORE(runtime_init_pre_core_tls_setup, PICO_RUNTIME_IN
+ //            "ldr r0, =__tls_base\n"
+ //            "bx lr\n"
+ //            );
+-//}
+\ No newline at end of file
++//}
+diff --git a/src/rp2_common/pico_crt0/crt0_riscv.S b/src/rp2_common/pico_crt0/crt0_riscv.S
+index e9fc7d9..82864d0 100644
+--- a/src/rp2_common/pico_crt0/crt0_riscv.S
++++ b/src/rp2_common/pico_crt0/crt0_riscv.S
+@@ -171,11 +171,13 @@ __soft_vector_table:
+ .word isr_irq\n
+ .endm
+ 
++.altmacro
+ .set IRQN, 0
+ .rept PICO_NUM_VTABLE_IRQS
+-vtable_irq_n IRQN
++vtable_irq_n %IRQN
+ .set IRQN, IRQN + 1
+ .endr
++.noaltmacro
+ 
+ // all default trap handlers do nothing, and we can check for them being set to our
+ // default values by seeing if they point to somewhere between __defaults_isrs_start and __default_isrs_end
+@@ -222,11 +224,13 @@ decl_isr_bkpt isr_riscv_machine_soft_irq
+ .endif
+ .endm
+ 
++.altmacro
+ .set IRQN, 0
+ .rept PICO_NUM_VTABLE_IRQS
+-decl_isr_n IRQN
++decl_isr_n %IRQN
+ .set IRQN, IRQN + 1
+ .endr
++.noaltmacro
+     // fall through
+ 
+ // All unhandled USER IRQs fall through to here. Note there is no way to get
+diff --git a/src/rp2_common/pico_crt0/rp2040/memmap_blocked_ram.ld b/src/rp2_common/pico_crt0/rp2040/memmap_blocked_ram.ld
+index 6f50005..82772d3 100644
+--- a/src/rp2_common/pico_crt0/rp2040/memmap_blocked_ram.ld
++++ b/src/rp2_common/pico_crt0/rp2040/memmap_blocked_ram.ld
+@@ -4,10 +4,12 @@
+     __exidx_end
+     __etext
+     __data_start__
++    __bothinit_array_start
+     __preinit_array_start
+     __preinit_array_end
+     __init_array_start
+     __init_array_end
++    __bothinit_array_end
+     __fini_array_start
+     __fini_array_end
+     __data_end__
+@@ -87,6 +89,7 @@ SECTIONS
+ 
+         . = ALIGN(4);
+         /* preinit data */
++        PROVIDE_HIDDEN (__bothinit_array_start = .);
+         PROVIDE_HIDDEN (__preinit_array_start = .);
+         KEEP(*(SORT(.preinit_array.*)))
+         KEEP(*(.preinit_array))
+@@ -98,6 +101,7 @@ SECTIONS
+         KEEP(*(SORT(.init_array.*)))
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
++        PROVIDE_HIDDEN (__bothinit_array_end = .);
+ 
+         . = ALIGN(4);
+         /* finit data */
+diff --git a/src/rp2_common/pico_crt0/rp2040/memmap_copy_to_ram.ld b/src/rp2_common/pico_crt0/rp2040/memmap_copy_to_ram.ld
+index 842ebfd..405d03f 100644
+--- a/src/rp2_common/pico_crt0/rp2040/memmap_copy_to_ram.ld
++++ b/src/rp2_common/pico_crt0/rp2040/memmap_copy_to_ram.ld
+@@ -4,10 +4,12 @@
+     __exidx_end
+     __etext
+     __data_start__
++    __bothinit_array_start
+     __preinit_array_start
+     __preinit_array_end
+     __init_array_start
+     __init_array_end
++    __bothinit_array_end
+     __fini_array_start
+     __fini_array_end
+     __data_end__
+@@ -155,6 +157,7 @@ SECTIONS
+ 
+         . = ALIGN(4);
+         /* preinit data */
++        PROVIDE_HIDDEN (__bothinit_array_start = .);
+         PROVIDE_HIDDEN (__preinit_array_start = .);
+         KEEP(*(SORT(.preinit_array.*)))
+         KEEP(*(.preinit_array))
+@@ -166,6 +169,7 @@ SECTIONS
+         KEEP(*(SORT(.init_array.*)))
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
++        PROVIDE_HIDDEN (__bothinit_array_end = .);
+ 
+         . = ALIGN(4);
+         /* finit data */
+diff --git a/src/rp2_common/pico_crt0/rp2040/memmap_default.ld b/src/rp2_common/pico_crt0/rp2040/memmap_default.ld
+index 5125401..546b960 100644
+--- a/src/rp2_common/pico_crt0/rp2040/memmap_default.ld
++++ b/src/rp2_common/pico_crt0/rp2040/memmap_default.ld
+@@ -4,10 +4,12 @@
+     __exidx_end
+     __etext
+     __data_start__
++    __bothinit_array_start
+     __preinit_array_start
+     __preinit_array_end
+     __init_array_start
+     __init_array_end
++    __bothinit_array_end
+     __fini_array_start
+     __fini_array_end
+     __data_end__
+@@ -87,6 +89,7 @@ SECTIONS
+ 
+         . = ALIGN(4);
+         /* preinit data */
++        PROVIDE_HIDDEN (__bothinit_array_start = .);
+         PROVIDE_HIDDEN (__preinit_array_start = .);
+         KEEP(*(SORT(.preinit_array.*)))
+         KEEP(*(.preinit_array))
+@@ -98,6 +101,7 @@ SECTIONS
+         KEEP(*(SORT(.init_array.*)))
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
++        PROVIDE_HIDDEN (__bothinit_array_end = .);
+ 
+         . = ALIGN(4);
+         /* finit data */
+diff --git a/src/rp2_common/pico_crt0/rp2040/memmap_no_flash.ld b/src/rp2_common/pico_crt0/rp2040/memmap_no_flash.ld
+index dbf006a..d7bd823 100644
+--- a/src/rp2_common/pico_crt0/rp2040/memmap_no_flash.ld
++++ b/src/rp2_common/pico_crt0/rp2040/memmap_no_flash.ld
+@@ -4,10 +4,12 @@
+     __exidx_end
+     __etext
+     __data_start__
++    __bothinit_array_start
+     __preinit_array_start
+     __preinit_array_end
+     __init_array_start
+     __init_array_end
++    __bothinit_array_end
+     __fini_array_start
+     __fini_array_end
+     __data_end__
+@@ -118,6 +120,7 @@ SECTIONS
+ 
+         . = ALIGN(4);
+         /* preinit data */
++        PROVIDE_HIDDEN (__bothinit_array_start = .);
+         PROVIDE_HIDDEN (__preinit_array_start = .);
+         KEEP(*(SORT(.preinit_array.*)))
+         KEEP(*(.preinit_array))
+@@ -129,6 +132,7 @@ SECTIONS
+         KEEP(*(SORT(.init_array.*)))
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
++        PROVIDE_HIDDEN (__bothinit_array_end = .);
+ 
+         . = ALIGN(4);
+         /* finit data */
+diff --git a/src/rp2_common/pico_crt0/rp2350/memmap_copy_to_ram.ld b/src/rp2_common/pico_crt0/rp2350/memmap_copy_to_ram.ld
+index 44c69f3..a87f0ed 100644
+--- a/src/rp2_common/pico_crt0/rp2350/memmap_copy_to_ram.ld
++++ b/src/rp2_common/pico_crt0/rp2350/memmap_copy_to_ram.ld
+@@ -4,10 +4,12 @@
+     __exidx_end
+     __etext
+     __data_start__
++    __bothinit_array_start
+     __preinit_array_start
+     __preinit_array_end
+     __init_array_start
+     __init_array_end
++    __bothinit_array_end
+     __fini_array_start
+     __fini_array_end
+     __data_end__
+@@ -173,6 +175,7 @@ SECTIONS
+ 
+         . = ALIGN(4);
+         /* preinit data */
++        PROVIDE_HIDDEN (__bothinit_array_start = .);
+         PROVIDE_HIDDEN (__preinit_array_start = .);
+         KEEP(*(SORT(.preinit_array.*)))
+         KEEP(*(.preinit_array))
+@@ -184,6 +187,7 @@ SECTIONS
+         KEEP(*(SORT(.init_array.*)))
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
++        PROVIDE_HIDDEN (__bothinit_array_end = .);
+ 
+         . = ALIGN(4);
+         /* finit data */
+diff --git a/src/rp2_common/pico_crt0/rp2350/memmap_default.ld b/src/rp2_common/pico_crt0/rp2350/memmap_default.ld
+index bce316d..1570352 100644
+--- a/src/rp2_common/pico_crt0/rp2350/memmap_default.ld
++++ b/src/rp2_common/pico_crt0/rp2350/memmap_default.ld
+@@ -4,10 +4,12 @@
+     __exidx_end
+     __etext
+     __data_start__
++    __bothinit_array_start
+     __preinit_array_start
+     __preinit_array_end
+     __init_array_start
+     __init_array_end
++    __bothinit_array_end
+     __fini_array_start
+     __fini_array_end
+     __data_end__
+@@ -77,6 +79,7 @@ SECTIONS
+ 
+         . = ALIGN(4);
+         /* preinit data */
++        PROVIDE_HIDDEN (__bothinit_array_start = .);
+         PROVIDE_HIDDEN (__preinit_array_start = .);
+         KEEP(*(SORT(.preinit_array.*)))
+         KEEP(*(.preinit_array))
+@@ -88,6 +91,7 @@ SECTIONS
+         KEEP(*(SORT(.init_array.*)))
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
++        PROVIDE_HIDDEN (__bothinit_array_end = .);
+ 
+         . = ALIGN(4);
+         /* finit data */
+diff --git a/src/rp2_common/pico_crt0/rp2350/memmap_no_flash.ld b/src/rp2_common/pico_crt0/rp2350/memmap_no_flash.ld
+index 5bedf6d..9d3b2f9 100644
+--- a/src/rp2_common/pico_crt0/rp2350/memmap_no_flash.ld
++++ b/src/rp2_common/pico_crt0/rp2350/memmap_no_flash.ld
+@@ -4,10 +4,12 @@
+     __exidx_end
+     __etext
+     __data_start__
++    __bothinit_array_start
+     __preinit_array_start
+     __preinit_array_end
+     __init_array_start
+     __init_array_end
++    __bothinit_array_end
+     __fini_array_start
+     __fini_array_end
+     __data_end__
+@@ -121,6 +123,7 @@ SECTIONS
+ 
+         . = ALIGN(4);
+         /* preinit data */
++        PROVIDE_HIDDEN (__bothinit_array_start = .);
+         PROVIDE_HIDDEN (__preinit_array_start = .);
+         KEEP(*(SORT(.preinit_array.*)))
+         KEEP(*(.preinit_array))
+@@ -132,6 +135,7 @@ SECTIONS
+         KEEP(*(SORT(.init_array.*)))
+         KEEP(*(.init_array))
+         PROVIDE_HIDDEN (__init_array_end = .);
++        PROVIDE_HIDDEN (__bothinit_array_end = .);
+ 
+         . = ALIGN(4);
+         /* finit data */
+diff --git a/src/rp2_common/pico_platform_compiler/include/pico/platform/compiler.h b/src/rp2_common/pico_platform_compiler/include/pico/platform/compiler.h
+index 7f24008..00083b9 100644
+--- a/src/rp2_common/pico_platform_compiler/include/pico/platform/compiler.h
++++ b/src/rp2_common/pico_platform_compiler/include/pico/platform/compiler.h
+@@ -21,6 +21,9 @@
+ 
+ #if defined __GNUC__
+ #include <sys/cdefs.h>
++#ifdef __PICOLIBC__
++#define __printflike(a,b) __picolibc_format(printf,a,b)
++#endif
+ // note LLVM defines __GNUC__
+ #ifdef __clang__
+ #define PICO_C_COMPILER_IS_CLANG 1
+diff --git a/src/rp2_common/pico_runtime/CMakeLists.txt b/src/rp2_common/pico_runtime/CMakeLists.txt
+index e190d51..8afb233 100644
+--- a/src/rp2_common/pico_runtime/CMakeLists.txt
++++ b/src/rp2_common/pico_runtime/CMakeLists.txt
+@@ -46,7 +46,9 @@ endforeach()
+ 
+ # todo is this correct/needed?
+ if (PICO_C_COMPILER_IS_GNU)
+-    target_link_options(pico_runtime INTERFACE "--specs=nosys.specs")
++    if (PICO_CLIB STREQUAL "newlib")
++        target_link_options(${NAME} PRIVATE "--specs=nosys.specs")
++    endif()
+ elseif (PICO_C_COMPILER_IS_CLANG)
+    # target_link_options(pico_runtime INTERFACE "-nostdlib")
+ endif()
+diff --git a/src/rp2_common/pico_standard_link/CMakeLists.txt b/src/rp2_common/pico_standard_link/CMakeLists.txt
+index c16968b..a02ae75 100644
+--- a/src/rp2_common/pico_standard_link/CMakeLists.txt
++++ b/src/rp2_common/pico_standard_link/CMakeLists.txt
+@@ -125,13 +125,13 @@ if (NOT TARGET pico_standard_link)
+     set(PICO_FLASH_SIZE_BYTES_STRING "${PICO_FLASH_SIZE_BYTES}")
+     configure_file(${CMAKE_CURRENT_LIST_DIR}/pico_flash_region.template.ld ${CMAKE_BINARY_DIR}/pico_flash_region.ld)
+     # add include path for linker scripts
+-    target_link_options(pico_standard_link INTERFACE "LINKER:-L${CMAKE_BINARY_DIR}")
++    target_link_options(pico_standard_link INTERFACE "-L${CMAKE_BINARY_DIR}")
+ 
+     # LINKER script will be PICO_TARGET_LINKER_SCRIPT if set on target, or ${CMAKE_CURRENT_LIST_DIR}/memmap_foo.ld
+     # if PICO_TARGET_BINARY_TYPE is set to foo on the target, otherwise ${CMAKE_CURRENT_LIST_DIR}/memmap_${PICO_DEFAULT_BINARY_TYPE).ld
+     set(_LINKER_SCRIPT_EXPRESSION "$<IF:$<BOOL:$<TARGET_PROPERTY:PICO_TARGET_LINKER_SCRIPT>>,$<TARGET_PROPERTY:PICO_TARGET_LINKER_SCRIPT>,${PICO_LINKER_SCRIPT_PATH}/memmap_$<IF:$<STREQUAL:$<TARGET_PROPERTY:PICO_TARGET_BINARY_TYPE>,>,${PICO_DEFAULT_BINARY_TYPE},$<TARGET_PROPERTY:PICO_TARGET_BINARY_TYPE>>.ld>")
+     target_link_options(pico_standard_link INTERFACE
+-        "LINKER:--script=${_LINKER_SCRIPT_EXPRESSION}"
++        "-T${_LINKER_SCRIPT_EXPRESSION}"
+             )
+     pico_add_link_depend(pico_standard_link ${_LINKER_SCRIPT_EXPRESSION})
+     unset(_LINKER_SCRIPT_EXPRESSION)
+@@ -191,4 +191,43 @@ if (NOT TARGET pico_standard_link)
+             endif()
+         endif()
+     endif()
++
++    # Convert pico-sdk printf variant selection into picolibc version
++    # when using pico_printf_compiler.
++    #
++    # GNU ld (ld.bfd) with picolibc supports the --printf=<variant> driver flag,
++    # which internally maps to --defsym=vfprintf=__<variant>_vfprintf.
++    # lld does not recognise --printf=<variant>, but it does support --defsym, so
++    # for clang builds we emit the equivalent -Wl,--defsym directly.
++
++    if (PICO_CLIB STREQUAL "picolibc")
++        if (PICO_C_COMPILER_IS_CLANG)
++            if (RUNTIME_INCLUDE_PRINTF_MINIMAL)
++                target_link_options(pico_standard_link INTERFACE
++                  $<$<STREQUAL:$<TARGET_PROPERTY:PICO_TARGET_PRINTF_IMPL>,pico_printf_compiler>:-Wl,--defsym=vfprintf=__m_vfprintf>)
++            elseif (RUNTIME_INCLUDE_PRINTF_FLOAT)
++                # this is the default
++            elseif (RUNTIME_INCLUDE_PRINTF_LONG_LONG)
++                target_link_options(pico_standard_link INTERFACE
++                  $<$<STREQUAL:$<TARGET_PROPERTY:PICO_TARGET_PRINTF_IMPL>,pico_printf_compiler>:-Wl,--defsym=vfprintf=__l_vfprintf>)
++            else()
++                target_link_options(pico_standard_link INTERFACE
++                  $<$<STREQUAL:$<TARGET_PROPERTY:PICO_TARGET_PRINTF_IMPL>,pico_printf_compiler>:-Wl,--defsym=vfprintf=__i_vfprintf>)
++            endif()
++        else()
++            if (RUNTIME_INCLUDE_PRINTF_MINIMAL)
++                target_link_options(pico_standard_link INTERFACE
++                  $<$<STREQUAL:$<TARGET_PROPERTY:PICO_TARGET_PRINTF_IMPL>,pico_printf_compiler>:--printf=m>)
++            elseif (RUNTIME_INCLUDE_PRINTF_FLOAT)
++                # this is the default
++            elseif (RUNTIME_INCLUDE_PRINTF_LONG_LONG)
++                target_link_options(pico_standard_link INTERFACE
++                  $<$<STREQUAL:$<TARGET_PROPERTY:PICO_TARGET_PRINTF_IMPL>,pico_printf_compiler>:--printf=l>)
++            else()
++                target_link_options(pico_standard_link INTERFACE
++                  $<$<STREQUAL:$<TARGET_PROPERTY:PICO_TARGET_PRINTF_IMPL>,pico_printf_compiler>:--printf=i>)
++            endif()
++        endif()
++    endif()
++
+ endif()
