@@ -1,7 +1,7 @@
 name: pico-sdk builder
 
 on:
-  # pull_request: {} # Uncomment only to test this WF file update.
+  pull_request: {} # Remove once merged to default branch.
   schedule:
     # 6:00 AM UTC
     - cron: '0 6 * * *'
