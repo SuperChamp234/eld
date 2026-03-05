@@ -1,0 +1,433 @@
+name: pico-sdk builder
+
+on:
+  # pull_request: {} # Uncomment only to test this WF file update.
+  schedule:
+    # 6:00 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:     # Allows manual triggering
+
+jobs:
+  build:
+    name: ${{ matrix.arch.name }}
+    if: github.repository == 'qualcomm/eld'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          # RP2040 — Cortex-M0+ (ARMv6-M, soft-float, no FPU)
+          - name: rp2040
+            pico-platform: rp2040
+            toolchain-cmake: pico_arm_cortex_m0plus_clang.cmake
+            triple: armv6m-none-eabi
+            llvm-target: ARM
+            picolibc-arch: clang-thumbv6m-rp2040
+            # Flags used for compiler-rt and picolibc cross-compilation
+            target-flags: "--target=armv6m-none-eabi -mcpu=cortex-m0plus -mthumb -mfloat-abi=soft"
+            # Flags for CMAKE_CXX_FLAGS when configuring pico-sdk
+            # (sysroot and -stdlib=libc++ are appended in the cmake step)
+            cxx-flags: "--target=armv6m-none-eabi -mfloat-abi=soft -march=armv6m"
+            # Path relative to lib/clang-runtimes/ where the picolibc sysroot symlink goes
+            clang-runtimes-path: arm-none-eabi/armv6m_soft_nofp
+            # Any extra CMAKE_EXE_LINKER_FLAGS beyond the common set
+            extra-linker-flags: ""
+
+          # RP2350 ARM — Cortex-M33 (ARMv8-M.main, soft-float FPU, single-precision)
+          - name: rp2350-arm
+            pico-platform: rp2350-arm-s
+            toolchain-cmake: pico_arm_cortex_m33_clang.cmake
+            triple: armv8m.main-none-eabi
+            llvm-target: ARM
+            picolibc-arch: clang-thumbv8m.main-rp2350
+            target-flags: "--target=armv8m.main-none-eabi -mcpu=cortex-m33 -mthumb -mfloat-abi=softfp -march=armv8m.main+fp+dsp"
+            cxx-flags: "-mcpu=cortex-m33 --target=armv8m.main-none-eabi -mfloat-abi=softfp -march=armv8m.main+fp+dsp"
+            clang-runtimes-path: arm-none-eabi/armv8m.main_soft_nofp
+            extra-linker-flags: ""
+
+          # RP2350 RISC-V — Hazard3 (RV32IMAC + Zba/Zbb/Zbs/Zbkb, no FPU)
+          - name: rp2350-riscv
+            pico-platform: rp2350-riscv
+            toolchain-cmake: pico_riscv_clang.cmake
+            triple: riscv32-unknown-elf
+            llvm-target: RISCV
+            picolibc-arch: clang-rv32imac-rp2350
+            # -mno-relax: prevents R_RISCV_RELAX markers; lld/eld relaxation uses
+            # raw section offsets as P instead of placed VMAs → ~512 MB branch offsets.
+            target-flags: "--target=riscv32-unknown-elf -march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb -mabi=ilp32 -mno-relax"
+            # pico-sdk CMAKE_CXX_FLAGS: -mno-relax comes from PICO_COMMON_LANG_FLAGS
+            # in pico_riscv_clang.cmake, so it is intentionally omitted here.
+            cxx-flags: "--target=riscv32-unknown-elf -march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb -mabi=ilp32"
+            clang-runtimes-path: riscv32-unknown-elf
+            # -nostartfiles: Clang's BareMetal driver auto-links crt0.o for
+            # riscv32-unknown-elf but pico-sdk supplies its own startup in crt0_riscv.S.
+            extra-linker-flags: "-nostartfiles"
+
+    steps:
+      - name: Set up Clang 20
+        uses: egor-tensin/setup-clang@v1
+        with:
+          version: "20"
+          platform: x64
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y cmake ninja-build make python3 python3-pip git \
+            libc++-dev libc++abi-dev libclang-rt-20-dev pkg-config
+
+      - name: Checkout LLVM project
+        run: |
+          git clone --branch main --single-branch --depth 1 \
+            https://github.com/llvm/llvm-project ${{ github.workspace }}/llvm-project
+
+      - name: Checkout ELD
+        uses: actions/checkout@v4
+        with:
+          path: llvm-project/llvm/tools/eld
+
+      - name: Configure workflow environment variables
+        uses: ./llvm-project/llvm/tools/eld/.github/workflows/ConfigureBuildWorkflowENV
+
+      - name: Record pre-build entry
+        if: github.event_name == 'schedule'
+        uses: ./llvm-project/llvm/tools/eld/.github/workflows/BuildStatusDataRecorder
+        with:
+          enabled: true
+          project: "llvm-project/llvm/tools/eld"
+          stage: "pre-"
+          workflow-name: "pico-sdk"
+          record-mode: "record"
+          status: "fail"
+          run-id: ${{ github.run_id }}
+          arch-name: ${{ matrix.arch.name }}
+          branch-name: "${{ env.BUILD_BRANCH }}"
+
+      - name: Configure LLVM + ELD toolchain for ${{ matrix.arch.name }}
+        run: |
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_DEFAULT_TARGET_TRIPLE=${{ matrix.arch.triple }} \
+            -DCMAKE_C_COMPILER=`which clang` \
+            -DCMAKE_CXX_COMPILER=`which clang++` \
+            -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+            -DLLVM_TARGETS_TO_BUILD="X86;${{ matrix.arch.llvm-target }}" \
+            -DELD_TARGETS_TO_BUILD=${{ matrix.arch.llvm-target }} \
+            -DLLVM_BUILD_TESTS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_BUILD_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_BUILD_DOCS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain \
+            -S ${{ github.workspace }}/llvm-project/llvm \
+            -B ${{ github.workspace }}/build-${{ matrix.arch.name }}-toolchain/
+
+      - name: Build LLVM + ELD toolchain for ${{ matrix.arch.name }}
+        run: |
+          cmake --build ${{ github.workspace }}/build-${{ matrix.arch.name }}-toolchain/ -- install
+
+      - name: Build compiler-rt builtins for ${{ matrix.arch.name }}
+        run: |
+          TOOLCHAIN_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain
+          export PATH=${TOOLCHAIN_INSTALL}/bin:$PATH
+          cmake -G Ninja \
+            -B ${{ github.workspace }}/build-${{ matrix.arch.triple }}-builtins \
+            -S ${{ github.workspace }}/llvm-project/compiler-rt \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER_TARGET=${{ matrix.arch.triple }} \
+            -DCMAKE_C_COMPILER_FORCED=ON \
+            -DCMAKE_CXX_COMPILER_FORCED=ON \
+            -DCMAKE_CROSSCOMPILING=ON \
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+            -DCMAKE_C_FLAGS="${{ matrix.arch.target-flags }} -ffreestanding" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.arch.target-flags }} -ffreestanding" \
+            -DCMAKE_ASM_FLAGS="${{ matrix.arch.target-flags }}" \
+            -DCMAKE_AR=${TOOLCHAIN_INSTALL}/bin/llvm-ar \
+            -DCMAKE_NM=${TOOLCHAIN_INSTALL}/bin/llvm-nm \
+            -DCMAKE_RANLIB=${TOOLCHAIN_INSTALL}/bin/llvm-ranlib \
+            -DLLVM_CMAKE_DIR=${TOOLCHAIN_INSTALL}/lib/cmake/llvm \
+            -DCOMPILER_RT_BAREMETAL_BUILD=ON \
+            -DCOMPILER_RT_BUILD_BUILTINS=ON \
+            -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+            -DCOMPILER_RT_BUILD_XRAY=OFF \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_BUILD_PROFILE=OFF \
+            -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+            -DCOMPILER_RT_BUILD_ORC=OFF \
+            -DCOMPILER_RT_BUILD_CRT=OFF \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+            -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=ON \
+            -DCMAKE_INSTALL_PREFIX=$(clang -print-resource-dir)
+          cmake --build ${{ github.workspace }}/build-${{ matrix.arch.triple }}-builtins \
+            -- install-builtins
+
+      - name: Install Meson
+        run: |
+          git clone https://github.com/mesonbuild/meson.git ${{ github.workspace }}/meson
+          cd ${{ github.workspace }}/meson
+          ./packaging/create_zipapp.py --outfile meson.pyz --interpreter '/usr/bin/env python3' .
+          mkdir -p bin
+          ln -s $(realpath meson.pyz) bin/meson
+          echo "PATH=${{ github.workspace }}/meson/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Checkout Picolibc
+        run: |
+          git clone https://github.com/picolibc/picolibc.git ${{ github.workspace }}/picolibc
+
+      - name: Write picolibc meson cross file for ${{ matrix.arch.name }}
+        run: |
+          TOOLCHAIN_BIN=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain/bin
+          PICOLIBC_SRC=${{ github.workspace }}/picolibc
+          case "${{ matrix.arch.name }}" in
+            rp2040)
+              cat > "${PICOLIBC_SRC}/scripts/cross-clang-thumbv6m-rp2040.txt" << EOF
+[binaries]
+c = ['${TOOLCHAIN_BIN}/clang', '--target=armv6m-none-eabi', '-mcpu=cortex-m0plus', '-mthumb', '-mfloat-abi=soft', '-nostdlib']
+cpp = ['${TOOLCHAIN_BIN}/clang++', '--target=armv6m-none-eabi', '-mcpu=cortex-m0plus', '-mthumb', '-mfloat-abi=soft', '-nostdlib']
+ar = '${TOOLCHAIN_BIN}/llvm-ar'
+nm = '${TOOLCHAIN_BIN}/llvm-nm'
+strip = '${TOOLCHAIN_BIN}/llvm-strip'
+ld = '${TOOLCHAIN_BIN}/ld.lld'
+
+[host_machine]
+system = 'none'
+cpu_family = 'arm'
+cpu = 'cortex-m0plus'
+endian = 'little'
+
+[built-in options]
+c_args = ['-Werror=double-promotion', '-Wno-unsupported-floating-point-opt', '-fshort-enums']
+c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+
+[properties]
+skip_sanity_check = true
+default_flash_addr = '0x10000000'
+default_flash_size = '0x00200000'
+default_ram_addr   = '0x20000000'
+default_ram_size   = '0x00042000'
+EOF
+              ;;
+            rp2350-arm)
+              cat > "${PICOLIBC_SRC}/scripts/cross-clang-thumbv8m.main-rp2350.txt" << EOF
+[binaries]
+c = ['${TOOLCHAIN_BIN}/clang', '--target=armv8m.main-none-eabi', '-mcpu=cortex-m33', '-mthumb', '-mfloat-abi=softfp', '-march=armv8m.main+fp+dsp', '-nostdlib']
+cpp = ['${TOOLCHAIN_BIN}/clang++', '--target=armv8m.main-none-eabi', '-mcpu=cortex-m33', '-mthumb', '-mfloat-abi=softfp', '-march=armv8m.main+fp+dsp', '-nostdlib']
+ar = '${TOOLCHAIN_BIN}/llvm-ar'
+nm = '${TOOLCHAIN_BIN}/llvm-nm'
+strip = '${TOOLCHAIN_BIN}/llvm-strip'
+ld = '${TOOLCHAIN_BIN}/ld.lld'
+
+[host_machine]
+system = 'none'
+cpu_family = 'arm'
+cpu = 'cortex-m33'
+endian = 'little'
+
+[built-in options]
+c_args = ['-Werror=double-promotion', '-Wno-unsupported-floating-point-opt', '-fshort-enums']
+c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+
+[properties]
+skip_sanity_check = true
+default_flash_addr = '0x10000000'
+default_flash_size = '0x00200000'
+default_ram_addr   = '0x20000000'
+default_ram_size   = '0x00082000'
+EOF
+              ;;
+            rp2350-riscv)
+              cat > "${PICOLIBC_SRC}/scripts/cross-clang-rv32imac-rp2350.txt" << EOF
+[binaries]
+c = ['${TOOLCHAIN_BIN}/clang', '--target=riscv32-unknown-elf', '-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb', '-mabi=ilp32', '-mno-relax', '-nostdlib']
+cpp = ['${TOOLCHAIN_BIN}/clang++', '--target=riscv32-unknown-elf', '-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb', '-mabi=ilp32', '-mno-relax', '-nostdlib']
+ar = '${TOOLCHAIN_BIN}/llvm-ar'
+nm = '${TOOLCHAIN_BIN}/llvm-nm'
+strip = '${TOOLCHAIN_BIN}/llvm-strip'
+ld = '${TOOLCHAIN_BIN}/ld.lld'
+
+[host_machine]
+system = 'none'
+cpu_family = 'riscv32'
+cpu = 'hazard3'
+endian = 'little'
+
+[built-in options]
+c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+
+[properties]
+skip_sanity_check = true
+default_flash_addr = '0x10000000'
+default_flash_size = '0x00200000'
+default_ram_addr   = '0x20000000'
+default_ram_size   = '0x00082000'
+EOF
+              ;;
+          esac
+
+      - name: Build picolibc for ${{ matrix.arch.name }}
+        run: |
+          TOOLCHAIN_BIN=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain/bin
+          PICOLIBC_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-picolibc
+          export PATH=${TOOLCHAIN_BIN}:$PATH
+          meson setup \
+            ${{ github.workspace }}/build-${{ matrix.arch.name }}-picolibc \
+            ${{ github.workspace }}/picolibc \
+            --cross-file ${{ github.workspace }}/picolibc/scripts/cross-${{ matrix.arch.picolibc-arch }}.txt \
+            --prefix ${PICOLIBC_INSTALL} \
+            -Dincludedir=picolibc/${{ matrix.arch.triple }}/include \
+            -Dlibdir=picolibc/${{ matrix.arch.triple }}/lib \
+            -Dspecsdir=${PICOLIBC_INSTALL}/lib \
+            -Dmultilib=false \
+            -Dtests=false \
+            --buildtype=minsize
+          ninja -C ${{ github.workspace }}/build-${{ matrix.arch.name }}-picolibc
+          ninja -C ${{ github.workspace }}/build-${{ matrix.arch.name }}-picolibc install
+
+      - name: Build libc++/libc++abi for ${{ matrix.arch.name }}
+        run: |
+          TOOLCHAIN_BIN=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain/bin
+          PICOLIBC_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-picolibc
+          cmake -G Ninja \
+            -B ${{ github.workspace }}/build-${{ matrix.arch.name }}-libcxx \
+            -S ${{ github.workspace }}/llvm-project/runtimes \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${TOOLCHAIN_BIN}/clang \
+            -DCMAKE_CXX_COMPILER=${TOOLCHAIN_BIN}/clang++ \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            -DCMAKE_C_FLAGS="${{ matrix.arch.target-flags }} --sysroot=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }}" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.arch.target-flags }} --sysroot=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }}" \
+            -DCMAKE_AR=${TOOLCHAIN_BIN}/llvm-ar \
+            -DCMAKE_RANLIB=${TOOLCHAIN_BIN}/llvm-ranlib \
+            -DCMAKE_INSTALL_PREFIX=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }} \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DLIBCXX_ENABLE_SHARED=OFF \
+            -DLIBCXX_ENABLE_STATIC=ON \
+            -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF \
+            -DLIBCXX_ENABLE_FILESYSTEM=OFF \
+            -DLIBCXX_ENABLE_RANDOM_DEVICE=OFF \
+            -DLIBCXX_ENABLE_LOCALIZATION=OFF \
+            -DLIBCXX_ENABLE_UNICODE=OFF \
+            -DLIBCXX_ENABLE_WIDE_CHARACTERS=OFF \
+            -DLIBCXX_ENABLE_THREADS=OFF \
+            -DLIBCXX_ENABLE_MONOTONIC_CLOCK=OFF \
+            -DLIBCXX_ENABLE_EXCEPTIONS=OFF \
+            -DLIBCXX_USE_COMPILER_RT=ON \
+            -DLIBCXXABI_ENABLE_SHARED=OFF \
+            -DLIBCXXABI_ENABLE_STATIC=ON \
+            -DLIBCXXABI_ENABLE_THREADS=OFF \
+            -DLIBCXXABI_ENABLE_EXCEPTIONS=OFF \
+            -DLIBCXXABI_USE_COMPILER_RT=ON \
+            -DLIBCXXABI_USE_LLVM_UNWINDER=OFF
+          ninja -C ${{ github.workspace }}/build-${{ matrix.arch.name }}-libcxx install
+
+      - name: Checkout pico-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: '2.2.0'
+          path: pico-sdk
+          submodules: recursive
+
+      - name: Apply pico-sdk ELD patches
+        run: |
+          cd ${{ github.workspace }}/pico-sdk
+          git apply \
+            ${{ github.workspace }}/llvm-project/llvm/tools/eld/.github/workflows/patches/pico-sdk-eld.patch
+
+      - name: Create pico_riscv_clang.cmake toolchain file
+        if: matrix.arch.name == 'rp2350-riscv'
+        run: |
+          cat > ${{ github.workspace }}/pico-sdk/cmake/preload/toolchains/pico_riscv_clang.cmake << 'CMAKEOF'
+set(CMAKE_SYSTEM_PROCESSOR hazard3)
+
+# Runtime directory name looked up under lib/clang-runtimes/${PICO_CLANG_RUNTIME}
+set(PICO_CLANG_RUNTIMES riscv32-unknown-elf)
+
+# -mno-relax: prevents R_RISCV_RELAX markers.
+# lld/eld RISC-V relaxation uses raw section offsets as P instead of placed VMAs,
+# producing ~512 MB branch offsets. GNU ld does not have this issue.
+set(PICO_COMMON_LANG_FLAGS "--target=riscv32-unknown-elf -march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb -mabi=ilp32 -mno-relax")
+
+set(PICO_DISASM_OBJDUMP_ARGS "")
+
+include(${CMAKE_CURRENT_LIST_DIR}/util/pico_arm_clang_common.cmake)
+
+# For riscv32-unknown-elf, Clang's BareMetal driver automatically appends crt0.o
+# at link time (unlike *-none-eabi ARM triples).
+# pico-sdk supplies its own startup in crt0_riscv.S, so suppress the sysroot one.
+foreach(TYPE IN ITEMS EXE SHARED MODULE)
+    set(CMAKE_${TYPE}_LINKER_FLAGS_INIT "-nostartfiles")
+endforeach()
+CMAKEOF
+
+      - name: Create picolibc sysroot symlink for ${{ matrix.arch.name }}
+        run: |
+          TOOLCHAIN_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain
+          PICOLIBC_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-picolibc
+          SYMLINK_PATH=${TOOLCHAIN_INSTALL}/lib/clang-runtimes/${{ matrix.arch.clang-runtimes-path }}
+          mkdir -p $(dirname ${SYMLINK_PATH})
+          ln -sf \
+            ${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }} \
+            ${SYMLINK_PATH}
+
+      - name: Configure pico-sdk for ${{ matrix.arch.name }}
+        run: |
+          TOOLCHAIN_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain
+          PICOLIBC_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-picolibc
+          ELD_PATH=${TOOLCHAIN_INSTALL}/bin/ld.eld
+          cmake \
+            -B ${{ github.workspace }}/build-${{ matrix.arch.name }}-pico-sdk \
+            -S ${{ github.workspace }}/pico-sdk \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_PLATFORM=${{ matrix.arch.pico-platform }} \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/pico-sdk/cmake/preload/toolchains/${{ matrix.arch.toolchain-cmake }} \
+            -DPICO_TOOLCHAIN_PATH=${TOOLCHAIN_INSTALL}/bin \
+            -DPICO_CLIB=picolibc \
+            -DCMAKE_CXX_FLAGS="${{ matrix.arch.cxx-flags }} --sysroot=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }} -stdlib=libc++" \
+            -DPICO_COMPILER_SYSROOT=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }} \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.arch.extra-linker-flags }} -fuse-ld=${ELD_PATH} --rtlib=compiler-rt -stdlib=libc++ -Wl,-u,__real_malloc -Wl,-u,__real_free -Wl,-u,__real_calloc -Wl,-u,__real_realloc -Wl,-u,__real_vprintf -Wl,-u,__real_puts -Wl,--sysroot="
+
+      - name: Build pico-sdk for ${{ matrix.arch.name }}
+        run: |
+          cmake --build ${{ github.workspace }}/build-${{ matrix.arch.name }}-pico-sdk \
+            -j$(nproc)
+
+      - name: Collect ELF artifacts for ${{ matrix.arch.name }}
+        run: |
+          find ${{ github.workspace }}/build-${{ matrix.arch.name }}-pico-sdk \
+            -name "*.elf" \
+            -exec cp {} ${{ github.workspace }}/ \;
+
+      - name: Upload ELF artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-sdk-elfs-${{ matrix.arch.name }}
+          path: ${{ github.workspace }}/*.elf
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Update build entry
+        if: github.event_name == 'schedule'
+        uses: ./llvm-project/llvm/tools/eld/.github/workflows/BuildStatusDataRecorder
+        with:
+          enabled: true
+          project: "llvm-project/llvm/tools/eld"
+          stage: "post-"
+          workflow-name: "pico-sdk"
+          record-mode: "update"
+          status: "pass"
+          run-id: ${{ github.run_id }}
+          arch-name: ${{ matrix.arch.name }}
+          branch-name: "${{ env.BUILD_BRANCH }}"
