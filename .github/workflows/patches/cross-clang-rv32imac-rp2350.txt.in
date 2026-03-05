@@ -1,0 +1,24 @@
+[binaries]
+c = ['@TOOLCHAIN_BIN@/clang', '--target=riscv32-unknown-elf', '-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb', '-mabi=ilp32', '-mno-relax', '-nostdlib']
+cpp = ['@TOOLCHAIN_BIN@/clang++', '--target=riscv32-unknown-elf', '-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb', '-mabi=ilp32', '-mno-relax', '-nostdlib']
+ar = '@TOOLCHAIN_BIN@/llvm-ar'
+nm = '@TOOLCHAIN_BIN@/llvm-nm'
+strip = '@TOOLCHAIN_BIN@/llvm-strip'
+ld = '@TOOLCHAIN_BIN@/ld.lld'
+
+[host_machine]
+system = 'none'
+cpu_family = 'riscv32'
+cpu = 'hazard3'
+endian = 'little'
+
+[built-in options]
+c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+
+[properties]
+skip_sanity_check = true
+default_flash_addr = '0x10000000'
+default_flash_size = '0x00200000'
+default_ram_addr   = '0x20000000'
+default_ram_size   = '0x00082000'
