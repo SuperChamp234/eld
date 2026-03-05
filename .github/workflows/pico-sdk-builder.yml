@@ -186,95 +186,10 @@ jobs:
       - name: Write picolibc meson cross file for ${{ matrix.arch.name }}
         run: |
           TOOLCHAIN_BIN=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain/bin
-          PICOLIBC_SRC=${{ github.workspace }}/picolibc
-          case "${{ matrix.arch.name }}" in
-            rp2040)
-              cat > "${PICOLIBC_SRC}/scripts/cross-clang-thumbv6m-rp2040.txt" << EOF
-[binaries]
-c = ['${TOOLCHAIN_BIN}/clang', '--target=armv6m-none-eabi', '-mcpu=cortex-m0plus', '-mthumb', '-mfloat-abi=soft', '-nostdlib']
-cpp = ['${TOOLCHAIN_BIN}/clang++', '--target=armv6m-none-eabi', '-mcpu=cortex-m0plus', '-mthumb', '-mfloat-abi=soft', '-nostdlib']
-ar = '${TOOLCHAIN_BIN}/llvm-ar'
-nm = '${TOOLCHAIN_BIN}/llvm-nm'
-strip = '${TOOLCHAIN_BIN}/llvm-strip'
-ld = '${TOOLCHAIN_BIN}/ld.lld'
-
-[host_machine]
-system = 'none'
-cpu_family = 'arm'
-cpu = 'cortex-m0plus'
-endian = 'little'
-
-[built-in options]
-c_args = ['-Werror=double-promotion', '-Wno-unsupported-floating-point-opt', '-fshort-enums']
-c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-
-[properties]
-skip_sanity_check = true
-default_flash_addr = '0x10000000'
-default_flash_size = '0x00200000'
-default_ram_addr   = '0x20000000'
-default_ram_size   = '0x00042000'
-EOF
-              ;;
-            rp2350-arm)
-              cat > "${PICOLIBC_SRC}/scripts/cross-clang-thumbv8m.main-rp2350.txt" << EOF
-[binaries]
-c = ['${TOOLCHAIN_BIN}/clang', '--target=armv8m.main-none-eabi', '-mcpu=cortex-m33', '-mthumb', '-mfloat-abi=softfp', '-march=armv8m.main+fp+dsp', '-nostdlib']
-cpp = ['${TOOLCHAIN_BIN}/clang++', '--target=armv8m.main-none-eabi', '-mcpu=cortex-m33', '-mthumb', '-mfloat-abi=softfp', '-march=armv8m.main+fp+dsp', '-nostdlib']
-ar = '${TOOLCHAIN_BIN}/llvm-ar'
-nm = '${TOOLCHAIN_BIN}/llvm-nm'
-strip = '${TOOLCHAIN_BIN}/llvm-strip'
-ld = '${TOOLCHAIN_BIN}/ld.lld'
-
-[host_machine]
-system = 'none'
-cpu_family = 'arm'
-cpu = 'cortex-m33'
-endian = 'little'
-
-[built-in options]
-c_args = ['-Werror=double-promotion', '-Wno-unsupported-floating-point-opt', '-fshort-enums']
-c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-
-[properties]
-skip_sanity_check = true
-default_flash_addr = '0x10000000'
-default_flash_size = '0x00200000'
-default_ram_addr   = '0x20000000'
-default_ram_size   = '0x00082000'
-EOF
-              ;;
-            rp2350-riscv)
-              cat > "${PICOLIBC_SRC}/scripts/cross-clang-rv32imac-rp2350.txt" << EOF
-[binaries]
-c = ['${TOOLCHAIN_BIN}/clang', '--target=riscv32-unknown-elf', '-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb', '-mabi=ilp32', '-mno-relax', '-nostdlib']
-cpp = ['${TOOLCHAIN_BIN}/clang++', '--target=riscv32-unknown-elf', '-march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb', '-mabi=ilp32', '-mno-relax', '-nostdlib']
-ar = '${TOOLCHAIN_BIN}/llvm-ar'
-nm = '${TOOLCHAIN_BIN}/llvm-nm'
-strip = '${TOOLCHAIN_BIN}/llvm-strip'
-ld = '${TOOLCHAIN_BIN}/ld.lld'
-
-[host_machine]
-system = 'none'
-cpu_family = 'riscv32'
-cpu = 'hazard3'
-endian = 'little'
-
-[built-in options]
-c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-
-[properties]
-skip_sanity_check = true
-default_flash_addr = '0x10000000'
-default_flash_size = '0x00200000'
-default_ram_addr   = '0x20000000'
-default_ram_size   = '0x00082000'
-EOF
-              ;;
-          esac
+          PATCHES=${{ github.workspace }}/llvm-project/llvm/tools/eld/.github/workflows/patches
+          sed "s|@TOOLCHAIN_BIN@|${TOOLCHAIN_BIN}|g" \
+            "${PATCHES}/cross-${{ matrix.arch.picolibc-arch }}.txt.in" \
+            > ${{ github.workspace }}/picolibc/scripts/cross-${{ matrix.arch.picolibc-arch }}.txt
 
       - name: Build picolibc for ${{ matrix.arch.name }}
         run: |
@@ -349,28 +264,9 @@ EOF
       - name: Create pico_riscv_clang.cmake toolchain file
         if: matrix.arch.name == 'rp2350-riscv'
         run: |
-          cat > ${{ github.workspace }}/pico-sdk/cmake/preload/toolchains/pico_riscv_clang.cmake << 'CMAKEOF'
-set(CMAKE_SYSTEM_PROCESSOR hazard3)
-
-# Runtime directory name looked up under lib/clang-runtimes/${PICO_CLANG_RUNTIME}
-set(PICO_CLANG_RUNTIMES riscv32-unknown-elf)
-
-# -mno-relax: prevents R_RISCV_RELAX markers.
-# lld/eld RISC-V relaxation uses raw section offsets as P instead of placed VMAs,
-# producing ~512 MB branch offsets. GNU ld does not have this issue.
-set(PICO_COMMON_LANG_FLAGS "--target=riscv32-unknown-elf -march=rv32imac_zicsr_zifencei_zba_zbb_zbs_zbkb -mabi=ilp32 -mno-relax")
-
-set(PICO_DISASM_OBJDUMP_ARGS "")
-
-include(${CMAKE_CURRENT_LIST_DIR}/util/pico_arm_clang_common.cmake)
-
-# For riscv32-unknown-elf, Clang's BareMetal driver automatically appends crt0.o
-# at link time (unlike *-none-eabi ARM triples).
-# pico-sdk supplies its own startup in crt0_riscv.S, so suppress the sysroot one.
-foreach(TYPE IN ITEMS EXE SHARED MODULE)
-    set(CMAKE_${TYPE}_LINKER_FLAGS_INIT "-nostartfiles")
-endforeach()
-CMAKEOF
+          PATCHES=${{ github.workspace }}/llvm-project/llvm/tools/eld/.github/workflows/patches
+          cp "${PATCHES}/pico_riscv_clang.cmake" \
+            ${{ github.workspace }}/pico-sdk/cmake/preload/toolchains/pico_riscv_clang.cmake
 
       - name: Create picolibc sysroot symlink for ${{ matrix.arch.name }}
         run: |
