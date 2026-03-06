@@ -75,6 +75,9 @@ jobs:
           sudo apt install -y cmake ninja-build make python3 python3-pip git \
             libc++-dev libc++abi-dev libclang-rt-20-dev pkg-config
 
+      - name: Compute toolchain cache key
+        run: echo "CACHE_WEEK=$(date +%Y-%W)" >> $GITHUB_ENV
+
       - name: Checkout LLVM project
         run: |
           git clone --branch main --single-branch --depth 1 \
@@ -84,6 +87,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: llvm-project/llvm/tools/eld
+
+      - name: Cache LLVM + ELD toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain
+          key: llvm-eld-${{ matrix.arch.name }}-${{ env.CACHE_WEEK }}-${{ hashFiles('llvm-project/llvm/tools/eld/CMakeLists.txt') }}
+          restore-keys: |
+            llvm-eld-${{ matrix.arch.name }}-${{ env.CACHE_WEEK }}-
 
       - name: Configure workflow environment variables
         uses: ./llvm-project/llvm/tools/eld/.github/workflows/ConfigureBuildWorkflowENV
@@ -103,6 +115,7 @@ jobs:
           branch-name: "${{ env.BUILD_BRANCH }}"
 
       - name: Configure LLVM + ELD toolchain for ${{ matrix.arch.name }}
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -129,10 +142,12 @@ jobs:
             -B ${{ github.workspace }}/build-${{ matrix.arch.name }}-toolchain/
 
       - name: Build LLVM + ELD toolchain for ${{ matrix.arch.name }}
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           cmake --build ${{ github.workspace }}/build-${{ matrix.arch.name }}-toolchain/ -- install
 
       - name: Build compiler-rt builtins for ${{ matrix.arch.name }}
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           TOOLCHAIN_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain
           export PATH=${TOOLCHAIN_INSTALL}/bin:$PATH
@@ -195,10 +210,14 @@ jobs:
           TOOLCHAIN_BIN=${{ github.workspace }}/install-${{ matrix.arch.name }}-toolchain/bin
           PICOLIBC_INSTALL=${{ github.workspace }}/install-${{ matrix.arch.name }}-picolibc
           export PATH=${TOOLCHAIN_BIN}:$PATH
+          export CC_LD=eld
+          export CXX_LD=eld
           meson setup \
             ${{ github.workspace }}/build-${{ matrix.arch.name }}-picolibc \
             ${{ github.workspace }}/picolibc \
             --cross-file ${{ github.workspace }}/picolibc/scripts/cross-${{ matrix.arch.picolibc-arch }}.txt \
+            -Dc_ld=ld.eld \
+            -Dcpp_ld=ld.eld \
             --prefix ${PICOLIBC_INSTALL} \
             -Dincludedir=picolibc/${{ matrix.arch.triple }}/include \
             -Dlibdir=picolibc/${{ matrix.arch.triple }}/lib \
@@ -221,7 +240,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=${TOOLCHAIN_BIN}/clang++ \
             -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DCMAKE_C_FLAGS="${{ matrix.arch.target-flags }} --sysroot=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }}" \
-            -DCMAKE_CXX_FLAGS="${{ matrix.arch.target-flags }} --sysroot=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }}" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.arch.target-flags }} --sysroot=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }} -fuse-ld=eld" \
             -DCMAKE_AR=${TOOLCHAIN_BIN}/llvm-ar \
             -DCMAKE_RANLIB=${TOOLCHAIN_BIN}/llvm-ranlib \
             -DCMAKE_INSTALL_PREFIX=${PICOLIBC_INSTALL}/picolibc/${{ matrix.arch.triple }} \

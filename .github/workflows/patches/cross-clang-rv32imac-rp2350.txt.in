@@ -4,7 +4,6 @@ cpp = ['@TOOLCHAIN_BIN@/clang++', '--target=riscv32-unknown-elf', '-march=rv32im
 ar = '@TOOLCHAIN_BIN@/llvm-ar'
 nm = '@TOOLCHAIN_BIN@/llvm-nm'
 strip = '@TOOLCHAIN_BIN@/llvm-strip'
-ld = '@TOOLCHAIN_BIN@/ld.lld'
 
 [host_machine]
 system = 'none'
@@ -13,8 +12,8 @@ cpu = 'hazard3'
 endian = 'little'
 
 [built-in options]
-c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+c_link_args = ['--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+cpp_link_args = ['--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
 
 [properties]
 skip_sanity_check = true
