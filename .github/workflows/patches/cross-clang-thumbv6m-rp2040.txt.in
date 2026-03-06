@@ -4,7 +4,6 @@ cpp = ['@TOOLCHAIN_BIN@/clang++', '--target=armv6m-none-eabi', '-mcpu=cortex-m0p
 ar = '@TOOLCHAIN_BIN@/llvm-ar'
 nm = '@TOOLCHAIN_BIN@/llvm-nm'
 strip = '@TOOLCHAIN_BIN@/llvm-strip'
-ld = '@TOOLCHAIN_BIN@/ld.lld'
 
 [host_machine]
 system = 'none'
@@ -14,8 +13,8 @@ endian = 'little'
 
 [built-in options]
 c_args = ['-Werror=double-promotion', '-Wno-unsupported-floating-point-opt', '-fshort-enums']
-c_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
-cpp_link_args = ['-fuse-ld=lld', '--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+c_link_args = ['--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
+cpp_link_args = ['--rtlib=compiler-rt', '-Wl,-z,noexecstack', '-Wno-unused-command-line-argument']
 
 [properties]
 skip_sanity_check = true
