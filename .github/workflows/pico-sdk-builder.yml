@@ -10,7 +10,6 @@ on:
 jobs:
   build:
     name: ${{ matrix.arch.name }}
-    if: github.repository == 'qualcomm/eld'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -108,7 +107,7 @@ jobs:
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
-            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_ENABLE_PROJECTS="clang" \
             -DLLVM_DEFAULT_TARGET_TRIPLE=${{ matrix.arch.triple }} \
             -DCMAKE_C_COMPILER=`which clang` \
             -DCMAKE_CXX_COMPILER=`which clang++` \
