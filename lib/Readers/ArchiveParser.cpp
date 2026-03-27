@@ -478,21 +478,13 @@ ArchiveParser::shouldIncludeSymbol(const ArchiveFile &archive,
   if (isPostLTOPhase && !m_Module.hasWrapReference(SymName))
     return ArchiveFile::Symbol::Include;
 
-  // If there is no wrap option specified we default to the behavior (or
-  // If there is no wrap option set for this symbol, lets use the default
-  // behavior
-  if (m_Module.getConfig().options().renameMap().empty() ||
-      !m_Module.getConfig().options().renameMap().count(SymName))
-    return ArchiveFile::Symbol::Include;
-
-  // If there is a wrap option specified for that symbol, we only pull from
-  // an archive, if the real symbol is still undefined.
-  std::string realSymbol = ("__real_" + SymName).str();
-  ResolveInfo *RealSymbol = m_Module.getNamePool().findInfo(realSymbol);
-  if (RealSymbol && RealSymbol->isUndef())
-    return ArchiveFile::Symbol::Include;
-
-  return ArchiveFile::Symbol::Exclude;
+  // Symbol is undefined — include the archive member regardless of whether
+  // --wrap is active.  The __real_<sym> check that used to gate this was
+  // unreliable: IRBuilder renames __real_foo references to foo before archive
+  // scanning occurs, so __real_foo never appears in the name pool as an
+  // explicit undefined symbol.  The fact that foo is currently undefined
+  // (confirmed above) is sufficient reason to pull the member.
+  return ArchiveFile::Symbol::Include;
 }
 
 bool ArchiveParser::definedSameType(

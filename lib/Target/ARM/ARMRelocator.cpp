@@ -1092,21 +1092,19 @@ Relocator::Result thm_jump19(Relocation &pReloc, ARMRelocator &pParent) {
   Relocator::Address S;
   // if symbol has plt
   if (pReloc.symInfo()->reserved() & Relocator::ReservePLT) {
-    S = pParent.getTarget()
-            .findEntryInPLT(pReloc.symInfo())
-            ->getAddr(DiagEngine);
-    T = 0; // PLT is not thumb.
-  } else {
-    S = pParent.getSymValue(&pReloc);
-    if (T != 0x0)
-      helper_clear_thumb_bit(S);
-  }
-
-  if (0x0 == T) {
-    // FIXME: conditional branch to PLT in THUMB-2 not supported yet
+    // A PLT stub is ARM code (T=0), but R_ARM_THM_JUMP19 is a conditional
+    // Thumb-2 branch that cannot change processor state.  Branching
+    // conditionally to a PLT entry is therefore not supported.
     DiagEngine->raise(Diag::unsupport_cond_branch_reloc) << (int)pReloc.type();
     return Relocator::BadReloc;
   }
+
+  S = pParent.getSymValue(&pReloc);
+  // Clear the Thumb bit from S when the symbol carries it (T=1); for plain
+  // assembly labels without .thumb_func the bit is already clear (T=0) and
+  // the address is correct as-is.
+  if (T != 0x0)
+    helper_clear_thumb_bit(S);
 
   Relocator::DWord X = ((S + A) | T) - P;
   int32_t SignedValue = static_cast<int32_t>(X);
