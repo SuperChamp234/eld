@@ -2,9 +2,9 @@ name: nightly picolibc builder
 
 on:
   # pull_request: {} # Uncomment only to test this WF file update.
-  schedule:
-    # 10:00 PM Central
-    - cron: '0 4 * * *'
+  workflow_run:
+    workflows: ["Nightly check"]
+    types: [completed]
   workflow_dispatch:     # Allows manual triggering
 
 
@@ -13,7 +13,7 @@ permissions:
 jobs:
   build-and-test:
     name: ${{ matrix.arch.name }}
-    if: github.repository == 'qualcomm/eld'
+    if: github.event_name == 'workflow_dispatch' || (github.repository == 'qualcomm/eld' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -202,6 +202,21 @@ jobs:
           export CXX_LD=eld
           ../scripts/do-clang-${{ matrix.arch.picolibc-name }}-configure -Dc_ld=ld.eld -Dcpp_ld=ld.eld ${{ matrix.arch.picolibc-default-config }} -Dc_args="${{ matrix.arch.extra-c-flags }}" -Dcpp_args="${{ matrix.arch.extra-cxx-flags }}"
           ninja
+
+      - name: Pack Picolibc install for hexagon
+        if: matrix.arch.name == 'hexagon'
+        run: |
+          cd ${{ github.workspace }}/picolibc/build-clang-hexagon-picolibc-default-config
+          DESTDIR=${{ github.workspace }}/install-hexagon-picolibc-root ninja install
+          tar -Jcvf ${{ github.workspace }}/install-hexagon-picolibc.tar.xz \
+              -C ${{ github.workspace }} install-hexagon-picolibc-root
+
+      - name: Upload Picolibc install for hexagon
+        if: matrix.arch.name == 'hexagon'
+        uses: actions/upload-artifact@v7
+        with:
+          name: install-hexagon-picolibc.tar.xz
+          path: install-hexagon-picolibc.tar.xz
 
       - name: Build Picolibc for ${{ matrix.arch.name }}, no-tls
         run: |

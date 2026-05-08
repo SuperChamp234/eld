@@ -1,0 +1,166 @@
+name: H2 Picolibc LLVM Test-Suite Nightly
+
+on:
+  workflow_run:
+    workflows: ["H2 Picolibc Nightly"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      max-artifact-age-hours:
+        description: Maximum age for upstream nightly artifacts
+        required: false
+        default: '30'
+      toolchain-run-id:
+        description: Optional Nightly check run id for install-nightly-toolchain.tar.xz
+        required: false
+        default: ''
+      picolibc-run-id:
+        description: Optional picolibc-builder run id for install-hexagon-picolibc.tar.xz
+        required: false
+        default: ''
+      h2-run-id:
+        description: Optional H2 Picolibc Nightly run id for install-h2-v68-g0.tar.xz
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  single-source:
+    if: github.event_name == 'workflow_dispatch' || (github.repository == 'qualcomm/eld' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+
+    env:
+      SCRIPT_DIR: ${{ github.workspace }}/.github/workflows/scripts
+      TOOLCHAIN_DIR: ${{ github.workspace }}/install-nightly-toolchain
+      PICOLIBC_ARTIFACT_DIR: ${{ github.workspace }}/install-hexagon-picolibc-artifact
+      H2_ARTIFACT_DIR: ${{ github.workspace }}/install-h2-artifact
+      QEMU_SRC_DIR: ${{ github.workspace }}/qemu-system-hexagon
+      QEMU_INSTALL_DIR: ${{ github.workspace }}/install-qemu-system-hexagon
+      H2_INSTALL_DIR: ${{ github.workspace }}/install-h2-v68-g0
+      TESTSUITE_BUILD_DIR: ${{ github.workspace }}/build-llvm-test-suite-h2-v68-g0
+      H2_TARGET_TRIPLE: hexagon-unknown-h2-picolibc
+      LIT_JOBS: '2'
+
+    steps:
+      - name: Checkout ELD
+        uses: actions/checkout@v6
+
+      - name: Set up Clang 20
+        uses: egor-tensin/setup-clang@v2
+        with:
+          version: '20'
+          platform: x64
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y clang cmake ninja-build python3 python3-pip \
+            git jq xz-utils libglib2.0-dev libc++-dev libc++abi-dev libclang-rt-20-dev
+          python3 -m pip install --user lit
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download nightly toolchain with ELD
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_ID: nightly-test.yml
+          ARTIFACT_NAME: install-nightly-toolchain.tar.xz
+          DEST_DIR: ${{ github.workspace }}/artifacts
+          REPO: ${{ github.repository }}
+          BRANCH: main
+          MAX_AGE_HOURS: ${{ github.event.inputs['max-artifact-age-hours'] || '30' }}
+          RUN_ID: ${{ github.event.inputs['toolchain-run-id'] || '' }}
+        run: $SCRIPT_DIR/h2-fetch-workflow-artifact.sh
+
+      - name: Download nightly Hexagon picolibc
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_ID: picolibc-builder.yml
+          ARTIFACT_NAME: install-hexagon-picolibc.tar.xz
+          DEST_DIR: ${{ github.workspace }}/artifacts
+          REPO: ${{ github.repository }}
+          MAX_AGE_HOURS: ${{ github.event.inputs['max-artifact-age-hours'] || '30' }}
+          RUN_ID: ${{ github.event.inputs['picolibc-run-id'] || '' }}
+        run: $SCRIPT_DIR/h2-fetch-workflow-artifact.sh
+
+      - name: Download H2 v68/G0 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_ID: h2-picolibc-nightly.yml
+          ARTIFACT_NAME: install-h2-v68-g0.tar.xz
+          DEST_DIR: ${{ github.workspace }}/artifacts
+          REPO: ${{ github.repository }}
+          MAX_AGE_HOURS: ${{ github.event.inputs['max-artifact-age-hours'] || '30' }}
+          RUN_ID: ${{ github.event.workflow_run.id || github.event.inputs['h2-run-id'] || '' }}
+        run: $SCRIPT_DIR/h2-fetch-workflow-artifact.sh
+
+      - name: Extract and prepare toolchain
+        run: |
+          mkdir -p "$TOOLCHAIN_DIR"
+          tar -xJf artifacts/install-nightly-toolchain.tar.xz -C "$TOOLCHAIN_DIR" --strip-components=1
+          TOOLCHAIN_DIR="$TOOLCHAIN_DIR" "$SCRIPT_DIR/h2-install-toolchain-aliases.sh"
+          echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Install nightly picolibc into H2 target layout
+        run: |
+          mkdir -p "$PICOLIBC_ARTIFACT_DIR"
+          tar -xJf artifacts/install-hexagon-picolibc.tar.xz -C "$PICOLIBC_ARTIFACT_DIR"
+          TOOLCHAIN_DIR="$TOOLCHAIN_DIR" \
+          PICOLIBC_ARTIFACT_DIR="$PICOLIBC_ARTIFACT_DIR" \
+          H2_TARGET_TRIPLE="$H2_TARGET_TRIPLE" \
+          "$SCRIPT_DIR/h2-install-picolibc-artifact-g0.sh"
+
+      - name: Install H2 into toolchain target layout
+        run: |
+          mkdir -p "$H2_ARTIFACT_DIR"
+          tar -xJf artifacts/install-h2-v68-g0.tar.xz -C "$H2_ARTIFACT_DIR" --strip-components=1
+          TOOLCHAIN_DIR="$TOOLCHAIN_DIR" \
+          H2_INSTALL_DIR="$H2_ARTIFACT_DIR" \
+          H2_TARGET_TRIPLE="$H2_TARGET_TRIPLE" \
+          "$SCRIPT_DIR/h2-install-hypervisor-into-toolchain-g0.sh"
+
+      - name: Checkout llvm-test-suite
+        uses: actions/checkout@v6
+        with:
+          repository: llvm/llvm-test-suite
+          path: llvm-test-suite
+
+      - name: Build qemu-system-hexagon
+        run: |
+          QEMU_SRC_DIR="$QEMU_SRC_DIR" \
+          QEMU_INSTALL_DIR="$QEMU_INSTALL_DIR" \
+          "$SCRIPT_DIR/h2-build-qemu-hexagon.sh"
+          echo "$QEMU_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Configure llvm-test-suite SingleSource
+        run: |
+          TOOLCHAIN_DIR="$TOOLCHAIN_DIR" \
+          TESTSUITE_DIR="$GITHUB_WORKSPACE/llvm-test-suite" \
+          TESTSUITE_BUILD_DIR="$TESTSUITE_BUILD_DIR" \
+          QEMU_SYSTEM_HEXAGON="$QEMU_INSTALL_DIR/bin/qemu-system-hexagon" \
+          H2_TARGET_TRIPLE="$H2_TARGET_TRIPLE" \
+          HOST_CC=/usr/bin/clang \
+          HOST_CXX=/usr/bin/clang++ \
+          "$SCRIPT_DIR/h2-configure-llvm-testsuite-g0.sh"
+
+      - name: Build and run SingleSource tests
+        run: |
+          TESTSUITE_BUILD_DIR="$TESTSUITE_BUILD_DIR" \
+          RESULTS_JSON="$TESTSUITE_BUILD_DIR/h2-single-source-results.json" \
+          LIT_JOBS="$LIT_JOBS" \
+          "$SCRIPT_DIR/h2-run-llvm-testsuite-g0.sh"
+
+      - name: Upload H2 test-suite artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: h2-picolibc-single-source-artifacts
+          path: |
+            build-llvm-test-suite-h2-v68-g0/h2-single-source-results.json
+            build-llvm-test-suite-h2-v68-g0/**/*.log
+            build-llvm-test-suite-h2-v68-g0/**/*.time
+          if-no-files-found: ignore
+          retention-days: 60
