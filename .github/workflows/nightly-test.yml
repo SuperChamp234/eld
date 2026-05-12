@@ -16,10 +16,7 @@ jobs:
 
     steps:
       - name: Set up Clang 20
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "20"
-          env: true
+        run: LLVM_VERSION=20 .github/workflows/scripts/install-llvm-apt.sh
 
       - name: Install libc++ and libc++abi
         run: |
