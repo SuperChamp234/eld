@@ -23,10 +23,10 @@ jobs:
       - name: Set up Clang 20
         run: LLVM_VERSION=20 eld-workflow-scripts/.github/workflows/scripts/install-llvm-apt.sh
 
-      - name: Install libc++ and libc++abi
+      - name: Install system dependencies
         run: |
           sudo apt update
-          sudo apt install -y ccache
+          sudo apt install -y ccache cmake ninja-build python3 git xz-utils
 
       - name: Build and Test with Clang and show versions
         run: |

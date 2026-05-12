@@ -34,8 +34,8 @@ target_root="${TOOLCHAIN_DIR}/target/${target_triple}"
 target_lib_dir="${target_root}/lib/v68/G0"
 booter="${target_root}/bin/v68/G0/booter"
 linker_script="${target_lib_dir}/picolibc.ld"
-host_cc="${HOST_CC:-/usr/bin/clang}"
-host_cxx="${HOST_CXX:-/usr/bin/clang++}"
+host_cc="${HOST_CC:-clang}"
+host_cxx="${HOST_CXX:-clang++}"
 
 if [[ ! -x "${booter}" ]]; then
   echo "error: missing H2 booter: ${booter}" >&2

@@ -72,6 +72,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y ccache cmake ninja-build make bison flex python3 m4 git libglib2.0-dev
+
       - name: Checkout LLVM Project
         run: |
           git clone --branch main --single-branch --depth 1 https://github.com/llvm/llvm-project ${{ github.workspace }}/llvm-project

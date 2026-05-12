@@ -55,8 +55,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt update
-          sudo apt install -y clang cmake ninja-build python3 python3-pip \
-            git jq xz-utils libglib2.0-dev
+          sudo apt install -y cmake ninja-build python3 python3-pip \
+            git jq xz-utils libglib2.0-dev gh
           python3 -m pip install --user lit
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -139,8 +139,8 @@ jobs:
           TESTSUITE_BUILD_DIR="$TESTSUITE_BUILD_DIR" \
           QEMU_SYSTEM_HEXAGON="$QEMU_INSTALL_DIR/bin/qemu-system-hexagon" \
           H2_TARGET_TRIPLE="$H2_TARGET_TRIPLE" \
-          HOST_CC=/usr/bin/clang \
-          HOST_CXX=/usr/bin/clang++ \
+          HOST_CC=clang \
+          HOST_CXX=clang++ \
           "$SCRIPT_DIR/h2-configure-llvm-testsuite-g0.sh"
 
       - name: Build and run SingleSource tests
