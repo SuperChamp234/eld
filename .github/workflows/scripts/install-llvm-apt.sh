@@ -11,15 +11,17 @@ else
   SUDO="sudo"
 fi
 
+export DEBIAN_FRONTEND=noninteractive
+
 ${SUDO} apt-get update
-${SUDO} DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
+${SUDO} apt-get install -yq --no-install-recommends \
   ca-certificates wget lsb-release gnupg software-properties-common
 
 wget -q https://apt.llvm.org/llvm.sh -O /tmp/llvm.sh
 chmod +x /tmp/llvm.sh
 ${SUDO} /tmp/llvm.sh "${version}"
 
-${SUDO} DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
+${SUDO} apt-get install -yq --no-install-recommends \
   "clang-${version}" \
   "clang-format-${version}" \
   "clang-tidy-${version}" \
