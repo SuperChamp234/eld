@@ -60,8 +60,13 @@ jobs:
             extra-cxx-flags: "-march=armv7-a"
 
     steps:
+      - name: Checkout ELD for workflow scripts
+        uses: actions/checkout@v6
+        with:
+          path: eld-workflow-scripts
+
       - name: Set up Clang 20
-        run: LLVM_VERSION=20 .github/workflows/scripts/install-llvm-apt.sh
+        run: LLVM_VERSION=20 eld-workflow-scripts/.github/workflows/scripts/install-llvm-apt.sh
 
       - name: Install system dependencies
         run: |
