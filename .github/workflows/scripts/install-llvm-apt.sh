@@ -18,7 +18,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends 
   "clang-tidy-${version}" \
   "llvm-${version}" \
   "lld-${version}" \
-  "libclang-rt-${version}-dev"
+  "libclang-rt-${version}-dev" \
+  "libc++-${version}-dev" \
+  "libc++abi-${version}-dev"
 
 sudo ln -f -s "$(command -v clang-${version})" /usr/local/bin/clang
 sudo ln -f -s "$(command -v clang++-${version})" /usr/local/bin/clang++

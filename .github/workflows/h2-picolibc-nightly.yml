@@ -49,7 +49,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y clang cmake ninja-build make bison flex python3 \
-            git jq xz-utils libglib2.0-dev libc++-dev libc++abi-dev
+            git jq xz-utils libglib2.0-dev
 
       - name: Download nightly toolchain with ELD
         env:
