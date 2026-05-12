@@ -25,8 +25,9 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt update
-          sudo apt install -y ccache cmake ninja-build python3 git xz-utils
+          SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+          ${SUDO} apt-get update
+          ${SUDO} apt-get install -y ccache cmake ninja-build python3 git xz-utils
 
       - name: Build and Test with Clang and show versions
         run: |

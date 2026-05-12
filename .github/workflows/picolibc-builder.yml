@@ -70,8 +70,9 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt update
-          sudo apt install -y ccache cmake ninja-build make bison flex python3 m4 git libglib2.0-dev
+          SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+          ${SUDO} apt-get update
+          ${SUDO} apt-get install -y ccache cmake ninja-build make bison flex python3 m4 git libglib2.0-dev
 
       - name: Checkout LLVM Project
         run: |
@@ -255,7 +256,8 @@ jobs:
             ninja install
             echo "PATH=$QEMU_INSTALL/bin/:$PATH" >> $GITHUB_ENV
           else
-            sudo apt install qemu-system-arm qemu-system-aarch64 qemu-system-riscv32 qemu-system-riscv64
+            SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+            ${SUDO} apt install qemu-system-arm qemu-system-aarch64 qemu-system-riscv32 qemu-system-riscv64
           fi
 
       - name: Run Picolibc tests for ${{ matrix.arch.name }}, default-config

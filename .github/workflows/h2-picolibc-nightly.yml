@@ -47,8 +47,9 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt update
-          sudo apt install -y cmake ninja-build make bison flex python3 \
+          SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
+          ${SUDO} apt-get update
+          ${SUDO} apt-get install -y cmake ninja-build make bison flex python3 \
             git jq xz-utils libglib2.0-dev gh
 
       - name: Download nightly toolchain with ELD
