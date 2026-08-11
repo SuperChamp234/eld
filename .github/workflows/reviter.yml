@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: Set up Clang 20
-        uses: egor-tensin/setup-clang@v2
+        uses: egor-tensin/setup-clang@23bc15cd4207e45f1566447deb48f4ff3ef932cb #v2.3
         with:
           version: "20"
           platform: x64
@@ -46,14 +46,14 @@ jobs:
           free -h # or cat /proc/meminfo
 
       - name: Checkout llvm-project
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: llvm/llvm-project
           path: llvm-project
           ref: main
 
       - name: Checkout eld
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: llvm-project/llvm/tools/eld
           ref: main

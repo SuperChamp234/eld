@@ -138,6 +138,8 @@ public:
 
   bool addDynamicSymbols();
 
+  void sizeDynamic();
+
   /// addUndefSymbols - add any symbols specified by the -u flag
   /// forced undefined symbols
   ///   @return true if symbols added
@@ -274,9 +276,6 @@ public:
   bool createOutputSection(ObjectBuilder &Builder, OutputSectionEntry *Output,
                            bool PostLayout = false);
 
-  // For sections inside ELFFileFormat
-  void markDiscardFileFormatSections();
-
   void assignOffset(OutputSectionEntry *);
 
   void assignOffset(ELFSection *);
@@ -395,12 +394,23 @@ public:
   }
 
   static llvm::StringRef getWholeArchiveStringForReport() {
-    return "-whole-archive";
+    return "--whole-archive";
   }
 
   bool emitArchiveMemberReport(llvm::StringRef Filename) const;
 
 private:
+  /// Assigns version nodes to symbols with GNU ld semantics:
+  /// - Pass 1: Exact matches (forward order, first wins, warns on reassign)
+  /// - Pass 2: Non-* wildcards (reverse order, last wins)
+  /// - Pass 3: * wildcard (reverse order, last wins, lowest priority)
+  void assignVersionNodesToSymbols();
+
+  /// Validates and registers every node of a single parsed VersionScript
+  /// DecoratedPath is used only for diagnostics.
+  bool registerVersionScriptNodes(const VersionScript *VS,
+                                  llvm::StringRef DecoratedPath);
+
   std::unique_ptr<llvm::lto::LTO> ltoInit(llvm::lto::Config Conf,
                                           bool CompileToAssembly);
 

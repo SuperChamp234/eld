@@ -52,8 +52,7 @@ public:
                                   ResolveInfo::Binding SymBinding,
                                   ResolveInfo::SizeType SymSize,
                                   ResolveInfo::Visibility SymVisibility,
-                                  LDSymbol::ValueType SymValue,
-                                  bool IsPatchable) const;
+                                  LDSymbol::ValueType SymValue) const;
 
   // -----  modifiers  ----- //
   /// createSymbol - create a symbol but do not insert into the pool.
@@ -80,7 +79,7 @@ public:
                     ResolveInfo::Visibility Visibility,
                     ResolveInfo *OldSymbolInfo, Resolver::Result &PResult,
                     bool IsLtoPhase, bool IsBitCode, unsigned int PSymIdx,
-                    bool IsPatchable, DiagnosticPrinter *Printer);
+                    DiagnosticPrinter *Printer);
 
   LDSymbol *createPluginSymbol(InputFile *Input, std::string SymbolName,
                                Fragment *CurFragment, uint64_t Val,
@@ -89,12 +88,12 @@ public:
   size_t getNumGlobalSize() const { return GlobalSymbols.size(); }
 
   /// findSymbol - find the resolved output LDSymbol
-  const LDSymbol *findSymbol(std::string SymbolName) const;
-  LDSymbol *findSymbol(std::string SymbolName);
+  const LDSymbol *findSymbol(const std::string &SymbolName) const;
+  LDSymbol *findSymbol(const std::string &SymbolName);
 
   /// findInfo - find the resolved ResolveInfo
-  const ResolveInfo *findInfo(std::string SymbolName) const;
-  ResolveInfo *findInfo(std::string SymbolName);
+  const ResolveInfo *findInfo(const std::string &SymbolName) const;
+  ResolveInfo *findInfo(const std::string &SymbolName);
 
   // Get Local symbols.
   std::vector<ResolveInfo *> &getLocals() { return LocalSymbols; }

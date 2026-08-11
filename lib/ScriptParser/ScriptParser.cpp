@@ -41,6 +41,7 @@
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBufferRef.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include <optional>
 #include <utility>
@@ -204,47 +205,47 @@ eld::Expression &ScriptParser::combine(llvm::StringRef Op, eld::Expression &L,
                                        eld::Expression &R) {
   Module &Module = ThisScriptFile.module();
   if (Op == "+")
-    return *(make<Add>(Module, L, R));
+    return *(make<BinaryOp>("+", Expression::ADD, Module, L, R));
   if (Op == "-")
-    return *(make<Subtract>(Module, L, R));
+    return *(make<BinaryOp>("-", Expression::SUBTRACT, Module, L, R));
   if (Op == "*")
-    return *(make<Multiply>(Module, L, R));
+    return *(make<BinaryOp>("*", Expression::MULTIPLY, Module, L, R));
   if (Op == "/") {
     // FIXME: It be useful to pass current location for reporting
     // division by zero error!
-    return *(make<Divide>(Module, L, R));
+    return *(make<BinaryOp>("/", Expression::DIVIDE, Module, L, R));
   }
   if (Op == "%") {
     // FIXME: It be useful to pass current location for reporting
     // modulo by zero error!
-    return *(make<Modulo>(Module, L, R));
+    return *(make<BinaryOp>("%", Expression::MODULO, Module, L, R));
   }
   if (Op == "<<")
-    return *(make<LeftShift>(Module, L, R));
+    return *(make<BinaryOp>("<<", Expression::BITWISE_LS, Module, L, R));
   if (Op == ">>")
-    return *(make<RightShift>(Module, L, R));
+    return *(make<BinaryOp>(">>", Expression::BITWISE_RS, Module, L, R));
   if (Op == "<")
-    return *(make<ConditionLT>(Module, L, R));
+    return *(make<BinaryOp>("<", Expression::LT, Module, L, R));
   if (Op == ">")
-    return *(make<ConditionGT>(Module, L, R));
+    return *(make<BinaryOp>(">", Expression::GT, Module, L, R));
   if (Op == ">=")
-    return *(make<ConditionGTE>(Module, L, R));
+    return *(make<BinaryOp>(">=", Expression::GTE, Module, L, R));
   if (Op == "<=")
-    return *(make<ConditionLTE>(Module, L, R));
+    return *(make<BinaryOp>("<=", Expression::LTE, Module, L, R));
   if (Op == "==")
-    return *(make<ConditionEQ>(Module, L, R));
+    return *(make<BinaryOp>("==", Expression::EQ, Module, L, R));
   if (Op == "!=")
-    return *(make<ConditionNEQ>(Module, L, R));
+    return *(make<BinaryOp>("!=", Expression::NEQ, Module, L, R));
   if (Op == "||")
-    return *(make<LogicalOp>(Expression::LOGICAL_OR, Module, L, R));
+    return *(make<BinaryOp>("||", Expression::LOGICAL_OR, Module, L, R));
   if (Op == "&&")
-    return *(make<LogicalOp>(Expression::LOGICAL_AND, Module, L, R));
+    return *(make<BinaryOp>("&&", Expression::LOGICAL_AND, Module, L, R));
   if (Op == "&")
-    return *(make<BitwiseAnd>(Module, L, R));
+    return *(make<BinaryOp>("&", Expression::BITWISE_AND, Module, L, R));
   if (Op == "^")
-    return *(make<BitwiseXor>(Module, L, R));
+    return *(make<BinaryOp>("^", Expression::BITWISE_XOR, Module, L, R));
   if (Op == "|")
-    return *(make<BitwiseOr>(Module, L, R));
+    return *(make<BinaryOp>("|", Expression::BITWISE_OR, Module, L, R));
   llvm_unreachable("invalid operator");
 }
 
@@ -255,19 +256,19 @@ eld::Expression *ScriptParser::readPrimary() {
   Module &Module = ThisScriptFile.module();
   if (consume("~")) {
     Expression *E = readPrimary();
-    return make<Complement>(Module, *E);
+    return make<UnaryOp>("~", Expression::COM, Module, *E);
   }
   if (consume("!")) {
     Expression *E = readPrimary();
-    return make<UnaryNot>(Module, *E);
+    return make<UnaryOp>("!", Expression::UNARYNOT, Module, *E);
   }
   if (consume("-")) {
     Expression *E = readPrimary();
-    return make<UnaryMinus>(Module, *E);
+    return make<UnaryOp>("-", Expression::UNARYMINUS, Module, *E);
   }
   if (consume("+")) {
     Expression *E = readPrimary();
-    return make<UnaryPlus>(Module, *E);
+    return make<UnaryOp>("+", Expression::UNARYPLUS, Module, *E);
   }
 
   StringRef Tok = next();
@@ -365,8 +366,8 @@ eld::Expression *ScriptParser::readPrimary() {
     Expression *E2 = readExpr();
     expect(")");
     if (Tok == "MIN")
-      return make<Min>(Module, *E1, *E2);
-    return make<Max>(Module, *E1, *E2);
+      return make<BinaryOp>("MIN", Expression::MIN, Module, *E1, *E2);
+    return make<BinaryOp>("MAX", Expression::MAX, Module, *E1, *E2);
   }
   if (Tok == "ORIGIN") {
     StringRef Name = readParenLiteral();
@@ -487,31 +488,31 @@ bool ScriptParser::readSymbolAssignment(StringRef Tok,
     char SubOp = Op[0];
     switch (SubOp) {
     case '*':
-      E = make<Multiply>(Module, *S, *E);
+      E = make<BinaryOp>("*", Expression::MULTIPLY, Module, *S, *E);
       break;
     case '/':
-      E = make<Divide>(Module, *S, *E);
+      E = make<BinaryOp>("/", Expression::DIVIDE, Module, *S, *E);
       break;
     case '+':
-      E = make<Add>(Module, *S, *E);
+      E = make<BinaryOp>("+", Expression::ADD, Module, *S, *E);
       break;
     case '-':
-      E = make<Subtract>(Module, *S, *E);
+      E = make<BinaryOp>("-", Expression::SUBTRACT, Module, *S, *E);
       break;
     case '<':
-      E = make<LeftShift>(Module, *S, *E);
+      E = make<BinaryOp>("<<", Expression::BITWISE_LS, Module, *S, *E);
       break;
     case '>':
-      E = make<RightShift>(Module, *S, *E);
+      E = make<BinaryOp>(">>", Expression::BITWISE_RS, Module, *S, *E);
       break;
     case '&':
-      E = make<BitwiseAnd>(Module, *S, *E);
+      E = make<BinaryOp>("&", Expression::BITWISE_AND, Module, *S, *E);
       break;
     case '|':
-      E = make<BitwiseOr>(Module, *S, *E);
+      E = make<BinaryOp>("|", Expression::BITWISE_OR, Module, *S, *E);
       break;
     case '^':
-      E = make<BitwiseXor>(Module, *S, *E);
+      E = make<BinaryOp>("^", Expression::BITWISE_XOR, Module, *S, *E);
       break;
     default:
       llvm_unreachable("");
@@ -1449,15 +1450,12 @@ bool ScriptParser::readInclude(llvm::StringRef Tok) {
   llvm::StringRef FileName = unquote(next());
   // Apply --remap-inputs to the INCLUDE filename before searching.
   std::string RemappedFileName = FileName.str();
-  for (const auto &Entry : ThisConfig.options().getRemapInputs()) {
-    WildcardPattern Pat(Entry.Pattern);
-    if (Pat.matched(RemappedFileName)) {
-      if (ThisConfig.getPrinter()->isVerbose())
-        ThisConfig.raise(Diag::verbose_remap_input)
-            << RemappedFileName << Entry.Replacement;
-      RemappedFileName = Entry.Replacement;
-      break;
-    }
+  if (auto Replacement =
+          ThisConfig.options().findRemapInput(RemappedFileName)) {
+    if (ThisConfig.getPrinter()->isVerbose())
+      ThisConfig.raise(Diag::verbose_remap_input)
+          << RemappedFileName << *Replacement;
+    RemappedFileName = std::move(*Replacement);
   }
   LayoutInfo *layoutInfo = ThisScriptFile.module().getLayoutInfo();
   bool Result = true;

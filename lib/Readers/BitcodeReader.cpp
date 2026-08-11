@@ -70,6 +70,7 @@ getSymVisibility(const llvm::lto::InputFile::Symbol &Sym) {
   case llvm::GlobalValue::ProtectedVisibility:
     return ResolveInfo::Protected;
   }
+  llvm_unreachable("Unexpected VisibilityTypes!");
 }
 
 static size_t getSymSize(const llvm::lto::InputFile::Symbol &Sym) {
@@ -218,7 +219,7 @@ bool BitcodeReader::readInput(InputFile &InputFile,
         &InputFile, wrapName, false, eld::ResolveInfo::NoType,
         eld::ResolveInfo::Undefined, eld::ResolveInfo::Global, 0, 0,
         eld::ResolveInfo::Default, nullptr, result, false, false, 0,
-        false /* isPatchable */, m_Module.getPrinter());
+        m_Module.getPrinter());
     sym = make<LDSymbol>(result.Info, false);
     if (result.Overriden || !result.Info->outSymbol())
       result.Info->setOutSymbol(sym);

@@ -1,0 +1,262 @@
+name: Zephyr build and test (reusable)
+
+# Reusable Zephyr build + twister body, called by zephyr-nightly.yml and
+# zephyr-pr.yml. Callers resolve a run id and pass the toolset artifact/tarball
+# names; the fetch step normalizes either source to ./inst.
+
+on:
+  workflow_call:
+    inputs:
+      board:
+        description: "QEMU board to build/run (e.g. qemu_cortex_a53)"
+        required: true
+        type: string
+      arch:
+        description: "Arch label, used for ccache keys and build-status records"
+        required: true
+        type: string
+      extra_args:
+        description: "Extra Kconfig passed to west build (-D) and twister (-x); may be empty"
+        required: false
+        type: string
+        default: ""
+      test_scope:
+        description: "Path passed to twister -T (e.g. tests or tests/kernel)"
+        required: false
+        type: string
+        default: "tests"
+      toolset_run_id:
+        description: "Workflow run id to download the ELD toolset artifact from"
+        required: true
+        type: string
+      toolset_artifact:
+        description: "Artifact name to download (e.g. pr-eld-toolset or install-nightly-toolchain.tar.xz)"
+        required: true
+        type: string
+      toolset_tarball:
+        description: "Tar filename inside the artifact to extract (e.g. install-pr-toolset.tar.xz)"
+        required: true
+        type: string
+
+jobs:
+  zephyr-build-and-test:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci-base:main
+      options: --user 0
+    env:
+      CPULLVM_VERSION: "22.1.0"
+      CPULLVM_DIR: /opt/cpullvm
+      CCACHE_DIR: /root/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "1"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_COMPRESS: "1"
+      CCACHE_COMPILERCHECK: "content"
+
+    steps:
+      - name: Checkout eld
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: llvm-project/llvm/tools/eld
+
+      - name: Prepare ccache dir
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --version | head -1
+
+      - name: Restore ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 #v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ inputs.arch }}-cpullvm${{ env.CPULLVM_VERSION }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.arch }}-cpullvm${{ env.CPULLVM_VERSION }}-
+
+      - name: ccache stats (before build)
+        run: ccache -s -v || ccache -s
+
+      - name: Record pre-build entry
+        if: github.event_name == 'schedule'
+        uses: ./llvm-project/llvm/tools/eld/.github/workflows/BuildStatusDataRecorder
+        with:
+          enabled: true
+          project: "llvm-project/llvm/tools/eld"
+          stage: "pre-"
+          workflow-name: "zephyr"
+          record-mode: "record"
+          status: "fail"
+          run-id: ${{github.run_id}}
+          arch-name: ${{ inputs.arch }}
+          branch-name: "main"
+
+      - name: Fetch ELD toolset
+        uses: ./llvm-project/llvm/tools/eld/.github/workflows/FetchEldToolset
+        with:
+          run-id: ${{ inputs.toolset_run_id }}
+          artifact-name: ${{ inputs.toolset_artifact }}
+          tarball: ${{ inputs.toolset_tarball }}
+
+      - name: Install cpullvm toolchain and splice ELD
+        run: |
+          # Download cpullvm release
+          wget -q --tries=3 --retry-on-http-error=429,500,502,503,504 --waitretry=5 https://github.com/qualcomm/cpullvm-toolchain/releases/download/cpullvm-${CPULLVM_VERSION}/cpullvm-${CPULLVM_VERSION}-Linux-x86_64.tar.xz
+          tar -xf cpullvm-${CPULLVM_VERSION}-Linux-x86_64.tar.xz
+          mv cpullvm-${CPULLVM_VERSION}-Linux-x86_64 ${CPULLVM_DIR}
+          rm cpullvm-${CPULLVM_VERSION}-Linux-x86_64.tar.xz
+
+          # Splice ELD (nightly or PR build) into cpullvm
+          cp inst/bin/ld.eld ${CPULLVM_DIR}/bin/ld.eld
+          cp inst/lib/libLW.so.4 ${CPULLVM_DIR}/lib/libLW.so.4
+          ln -sf libLW.so.4 ${CPULLVM_DIR}/lib/libLW.so
+
+          # ld.eld/libLW.so.4 link against the build's libc++; cpullvm/lib has
+          # none, so bundle the matching libc++/libc++abi.
+          cp -P inst/lib/libc++.so.1*    ${CPULLVM_DIR}/lib/
+          cp -P inst/lib/libc++abi.so.1* ${CPULLVM_DIR}/lib/
+
+          echo "ELD version:"
+          ${CPULLVM_DIR}/bin/ld.eld --version
+          echo "cpullvm clang version:"
+          ${CPULLVM_DIR}/bin/clang --version | head -1
+
+      - name: Clone Zephyr
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zephyrproject-rtos/zephyr
+          path: zephyr
+
+      - name: Set safe.directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE/zephyr"
+
+      - name: West setup
+        shell: bash
+        run: |
+          cd zephyr
+          west init -l .
+          # SoC-gated vendor HALs no QEMU board we build uses. Never compiled,
+          # only waste disk. Keep cmsis + cmsis_6 (Cortex-M core headers).
+          exclude='hal_adi|hal_afbr|hal_ambiq|hal_atmel|hal_bouffalolab|hal_espressif|hal_ethos_u|hal_gigadevice|hal_infineon|hal_intel|hal_microchip|hal_nordic|hal_nuvoton|hal_nxp|hal_openisa|hal_quicklogic|hal_realtek|hal_renesas|hal_rpi_pico|hal_sifli|hal_silabs|hal_st|hal_stm32|hal_tdk|hal_telink|hal_ti|hal_wch|hal_wurthelektronik|hal_xtensa|nrf_hw_models'
+          # Deny-list: modules upstream adds later are still fetched.
+          mapfile -t projects < <(west list --format '{name}' | grep -vxE "manifest|$exclude")
+          # Shallow + narrow: full fetch has run the container disk out of space.
+          west update --narrow --fetch-opt=--depth=1 "${projects[@]}"
+
+      - name: Install Zephyr SDK hosttools
+        run: |
+          west sdk install --no-gnu-toolchains --install-base /opt/toolchains
+
+      # cpullvm's armv7m soft-float picolibc is PIC. Borrow the SDK's non-PIC one via
+      # SYSROOT_DIR so ARM can use PICOLIBC_USE_TOOLCHAIN=y like the other boards.
+      - name: Install SDK LLVM ARM picolibc (non-PIC, for ${{ inputs.arch }})
+        if: inputs.arch == 'arm'
+        shell: bash
+        env:
+          ARM_SYSROOT: /opt/arm-picolibc
+        run: |
+          west sdk install --llvm --no-gnu-toolchains --install-base /opt/toolchains
+          multilib="$(echo /opt/toolchains/zephyr-sdk-*/llvm/lib/clang-runtimes/arm-none-eabi/armv7m_soft_nofp)"
+          if [ ! -f "${multilib}/lib/libc.a" ]; then
+            echo "::error::expected non-PIC picolibc missing at ${multilib}"
+            exit 1
+          fi
+          # The multilib is a self-contained sysroot, so keep the 17MB we need
+          # and drop the ~3GB rest.
+          cp -r "${multilib}" "${ARM_SYSROOT}"
+          rm -rf /opt/toolchains/zephyr-sdk-*/llvm
+          echo "ARM_SYSROOT=${ARM_SYSROOT}" >> "$GITHUB_ENV"
+          # Some tests are compiled with their own -Werror. This turns -Wmultilib-not-founds into fatal
+          # errors that twister's -W can't reach, so disable that warning.
+          echo "ARM_CFLAGS=-Wno-multilib-not-found" >> "$GITHUB_ENV"
+
+      - name: Build hello_world for ${{ inputs.board }} with ELD
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board }}
+          EXTRA_ARGS: ${{ inputs.extra_args }}
+        run: |
+          cd zephyr
+          source zephyr-env.sh
+          export ZEPHYR_SDK_INSTALL_DIR=/opt/toolchains/
+          export ZEPHYR_TOOLCHAIN_VARIANT=host/llvm
+          export LLVM_TOOLCHAIN_PATH=${CPULLVM_DIR}
+          west build -p always -b "$BOARD" samples/hello_world -- \
+            -DCONFIG_LLVM_USE_ELD=y \
+            -DCONFIG_COMPILER_RT_RTLIB=y \
+            ${ARM_SYSROOT:+-DSYSROOT_DIR=$ARM_SYSROOT} \
+            ${ARM_SYSROOT:+-DCMAKE_C_FLAGS=$ARM_CFLAGS} \
+            ${ARM_SYSROOT:+-DCMAKE_CXX_FLAGS=$ARM_CFLAGS} \
+            ${EXTRA_ARGS:+-D"$EXTRA_ARGS"}
+
+      - name: Run hello_world on QEMU
+        shell: bash
+        run: |
+          cd zephyr
+          source zephyr-env.sh
+          # No pipe to tee: qemu_riscv32_xip uses -machine sifive_e which has
+          # no QEMU exit mechanism, so QEMU outlives `timeout` and would keep
+          # tee blocked. pkill below frees the CPU for the next step.
+          timeout -k 1s 5s west build -t run > run_output.log 2>&1 || true
+          pkill -KILL -f "qemu-system.*build/zephyr/zephyr.elf" 2>/dev/null || true
+          cat run_output.log
+          if grep -q "Hello World" run_output.log; then
+            echo "hello_world executed successfully"
+          else
+            echo "hello_world did not produce expected output"
+            exit 1
+          fi
+
+      - name: Run twister tests for ${{ inputs.board }} with ELD
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board }}
+          TEST_SCOPE: ${{ inputs.test_scope }}
+          EXTRA_ARGS: ${{ inputs.extra_args }}
+        run: |
+          cd zephyr
+          source zephyr-env.sh
+          export ZEPHYR_SDK_INSTALL_DIR=/opt/toolchains/
+          export LLVM_TOOLCHAIN_PATH=${CPULLVM_DIR}
+          west twister -W -p "$BOARD" \
+            -T "$TEST_SCOPE" \
+            --quarantine-list "$GITHUB_WORKSPACE/llvm-project/llvm/tools/eld/.github/zephyr-quarantine.yml" \
+            -M pass \
+            --inline-logs \
+            --timestamps \
+            -j 3 \
+            -v \
+            -x=ZEPHYR_TOOLCHAIN_VARIANT=host/llvm \
+            -x=CONFIG_LLVM_USE_ELD=y \
+            -x=CONFIG_COMPILER_RT_RTLIB=y \
+            ${ARM_SYSROOT:+-x=SYSROOT_DIR=$ARM_SYSROOT} \
+            ${ARM_SYSROOT:+-x=CMAKE_C_FLAGS=$ARM_CFLAGS} \
+            ${ARM_SYSROOT:+-x=CMAKE_CXX_FLAGS=$ARM_CFLAGS} \
+            ${EXTRA_ARGS:+-x="$EXTRA_ARGS"}
+
+      - name: Upload twister results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: zephyr-twister-results-${{ inputs.board }}
+          retention-days: 2
+          path: |
+            zephyr/twister-out/twister.log
+            zephyr/twister-out/twister.json
+
+      - name: ccache stats (after build)
+        if: always()
+        run: ccache -s -v || ccache -s
+
+      - name: Update build entry
+        if: success() && github.event_name == 'schedule'
+        uses: ./llvm-project/llvm/tools/eld/.github/workflows/BuildStatusDataRecorder
+        with:
+          enabled: true
+          project: "llvm-project/llvm/tools/eld"
+          stage: "post-"
+          workflow-name: "zephyr"
+          record-mode: "update"
+          status: "pass"
+          run-id: ${{github.run_id}}
+          arch-name: ${{ inputs.arch }}
+          branch-name: "main"

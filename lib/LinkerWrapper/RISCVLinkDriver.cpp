@@ -99,9 +99,12 @@ RISCVLinkDriver::parseOptions(ArrayRef<const char *> Args,
                      /*ShowAllAliases=*/true);
     return LINK_SUCCESS;
   }
-  if (ArgList.hasArg(OPT_RISCVLinkOptTable::version)) {
-    printVersionInfo();
-    return LINK_SUCCESS;
+  if (llvm::opt::Arg *Arg = ArgList.getLastArg(
+          OPT_RISCVLinkOptTable::v, OPT_RISCVLinkOptTable::version)) {
+    if (Arg->getOption().matches(OPT_RISCVLinkOptTable::version)) {
+      printVersionInfo();
+      return LINK_SUCCESS;
+    }
   }
   // --about
   if (ArgList.hasArg(OPT_RISCVLinkOptTable::about)) {
@@ -140,19 +143,45 @@ RISCVLinkDriver::parseOptions(ArrayRef<const char *> Args,
   if (ArgList.hasArg(OPT_RISCVLinkOptTable::no_relax_tlsdesc))
     Config.options().setRISCVRelaxTLSDESC(false);
 
-  // --relax-tbljal, --no-relax-tbljal (default)
-  bool EnableTbljal =
-      ArgList.hasFlag(OPT_RISCVLinkOptTable::relax_tbljal,
-                      OPT_RISCVLinkOptTable::no_relax_tbljal, false);
-  if (EnableTbljal && (ArgList.hasArg(OPT_RISCVLinkOptTable::shared) ||
-                       ArgList.hasFlag(OPT_RISCVLinkOptTable::pie,
-                                       OPT_RISCVLinkOptTable::no_pie, false))) {
+  // --relax-tbljal[=zcmt|xqccmt], --no-relax-tbljal (default)
+  GeneralOptions::RISCVRelaxTbljalMode TbljalMode =
+      GeneralOptions::RISCVRelaxTbljalMode::None;
+  if (llvm::opt::Arg *Arg =
+          ArgList.getLastArg(OPT_RISCVLinkOptTable::relax_tbljal,
+                             OPT_RISCVLinkOptTable::relax_tbljal_eq,
+                             OPT_RISCVLinkOptTable::no_relax_tbljal)) {
+    if (Arg->getOption().matches(OPT_RISCVLinkOptTable::no_relax_tbljal)) {
+      TbljalMode = GeneralOptions::RISCVRelaxTbljalMode::None;
+    } else if (Arg->getOption().matches(OPT_RISCVLinkOptTable::relax_tbljal)) {
+      TbljalMode = GeneralOptions::RISCVRelaxTbljalMode::Zcmt;
+    } else {
+      TbljalMode =
+          llvm::StringSwitch<GeneralOptions::RISCVRelaxTbljalMode>(
+              Arg->getValue())
+              .CaseLower("zcmt", GeneralOptions::RISCVRelaxTbljalMode::Zcmt)
+              .CaseLower("xqccmt", GeneralOptions::RISCVRelaxTbljalMode::Xqccmt)
+              .Default(GeneralOptions::RISCVRelaxTbljalMode::None);
+      if (TbljalMode == GeneralOptions::RISCVRelaxTbljalMode::None) {
+        Config.raise(Diag::invalid_value_for_option)
+            << Arg->getOption().getPrefixedName() << Arg->getValue();
+        return LINK_FAIL;
+      }
+    }
+  }
+  if (TbljalMode != GeneralOptions::RISCVRelaxTbljalMode::None &&
+      (ArgList.hasArg(OPT_RISCVLinkOptTable::shared) ||
+       ArgList.hasFlag(OPT_RISCVLinkOptTable::pie,
+                       OPT_RISCVLinkOptTable::no_pie, false))) {
     Config.raise(Diag::not_supported)
-        << "Zcmt table jump relaxation"
+        << "Zcmt/Xqccmt table jump relaxation"
         << "shared libraries or position independent code";
     return LINK_FAIL;
   }
-  Config.options().setRISCVRelaxTbljal(EnableTbljal);
+  Config.options().setRISCVRelaxTbljal(TbljalMode);
+
+  // --no-relax-got
+  if (ArgList.hasArg(OPT_RISCVLinkOptTable::no_relax_got))
+    Config.options().setRISCVRelaxGOT(false);
 
   // --enable-bss-mixing
   if (ArgList.hasArg(OPT_RISCVLinkOptTable::enable_bss_mixing))
@@ -169,22 +198,6 @@ RISCVLinkDriver::parseOptions(ArrayRef<const char *> Args,
   // --keep-labels
   if (ArgList.hasArg(OPT_RISCVLinkOptTable::keep_labels))
     Config.options().setKeepLabels();
-
-  // --patch-enable
-  if (ArgList.getLastArg(OPT_RISCVLinkOptTable::patch_enable))
-    Config.options().setPatchEnable();
-
-  // --patch-base
-  if (llvm::opt::Arg *arg =
-          ArgList.getLastArg(OPT_RISCVLinkOptTable::patch_base))
-    Config.options().setPatchBase(arg->getValue());
-
-  if (Config.options().isPatchEnable()) {
-    if (Config.options().getStripSymbolMode() ==
-        GeneralOptions::StripAllSymbols)
-      Config.raise(Diag::warn_strip_symbols) << "--patch-enable";
-    Config.options().setStripSymbols(eld::GeneralOptions::StripLocals);
-  }
 
   Config.options().setUnknownOptions(
       ArgList.getAllArgValues(OPT_RISCVLinkOptTable::UNKNOWN));
@@ -262,13 +275,6 @@ bool RISCVLinkDriver::processOptions(llvm::opt::InputArgList &Args) {
   if (!GnuLdDriver::processOptions<T>(Args))
     return false;
 
-  // FIXME : remove duplicate code
-  if (Config.options().isPatchEnable()) {
-    if (Config.options().getStripSymbolMode() ==
-        GeneralOptions::StripAllSymbols)
-      Config.raise(Diag::warn_strip_symbols) << "--patch-enable";
-    Config.options().setStripSymbols(eld::GeneralOptions::StripLocals);
-  }
   return true;
 }
 

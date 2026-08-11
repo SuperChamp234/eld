@@ -27,7 +27,6 @@ This document describes usage of ELD
    documentation/image_structure_and_generation.rst
    documentation/layout.rst
    documentation/linker_plugins_updated.rst
-   documentation/linker_plugin.rst
    documentation/linker_optimizations.rst
    documentation/elf_tools.rst
    documentation/lto_support.rst
@@ -37,6 +36,16 @@ This document describes usage of ELD
    documentation/sframe_support.rst
    documentation/editor_support.rst
    documentation/linker_faq.rst
+
+
+.. toctree::
+   :maxdepth: 2
+   :glob:
+   :titlesonly:
+   :caption: Developer Docs
+   :numbered:
+
+   DeveloperDocs/*
 
 *******************
 User guide

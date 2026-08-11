@@ -255,6 +255,9 @@ Finally, to build documentation:
 
 - Configure CMake with the option `-DLLVM_ENABLE_SPHINX=On`
 - Build documentation by building `eld-docs` target: `cmake --build . --target eld-docs`
+- To also build `ELD_UserGuide.pdf`, configure with `-DELD_ENABLE_PDF_DOCS=ON`.
+  PDF generation uses Typst, provided either by the `typst` executable or the
+  Python package listed in `docs/userguide/requirements.txt`.
 
 ## Running DCO Checks Locally
 

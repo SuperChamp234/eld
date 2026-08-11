@@ -1,7 +1,10 @@
+.github/workflows/linux-kernel.yml  @steven6798
+.github/workflows/busybox.yml  @steven6798
 lib/BranchIsland		@quic-seaswara
 lib/Config		@quic-seaswara
 lib/Core		@quic-seaswara
 lib/Diagnostics		@parth-07
+docs/		@quic-shaksuma
 lib/Fragment		@quic-seaswara
 lib/GarbageCollection 		@quic-areg
 lib/Input		@parth-07

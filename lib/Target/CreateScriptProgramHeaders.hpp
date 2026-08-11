@@ -201,11 +201,13 @@ bool GNULDBackend::createScriptProgramHdrs() {
       hasVMARegion = true;
     }
     if (curIsDebugSection || (*out)->isDiscard()) {
-      cur->setAddr(dotSymbol->value());
-      evaluateAssignments(*out);
-      evaluateAssignmentsAtEndOfOutputSection(*out);
+      // Use addr=0; restore dot after evaluateAssignments resets it to 0.
+      uint64_t SavedDot = dotSymbol->value();
       cur->setAddr(0);
       cur->setPaddr(0);
+      evaluateAssignments(*out);
+      dotSymbol->setValue(SavedDot);
+      evaluateAssignmentsAtEndOfOutputSection(*out);
       ++out;
       continue;
     }
@@ -270,9 +272,16 @@ bool GNULDBackend::createScriptProgramHdrs() {
     } else if (hasVMARegion || hasLMARegion) {
       ScriptMemoryRegion &R = (*out)->epilog().lmaRegion();
       pma = R.getPhysicalAddr(*out);
-      if (!(*out)->prolog().hasAlignWithInput() && !hasLMARegion)
-        if (cur->getAddrAlign() > 0 && vma % cur->getAddrAlign() == 0)
-          alignAddress(pma, cur->getAddrAlign());
+      if (!(*out)->prolog().hasAlignWithInput()) {
+        // Apply alignment to LMA when there is no explicit AT> region, or when
+        // the script explicitly requested alignment via ALIGN() in the section
+        // description. Natural input-section alignment is suppressed with AT>
+        // because the LMA region cursor is authoritative in that case.
+        bool explicitAlign = (*out)->prolog().hasAlign();
+        if (!hasLMARegion || explicitAlign)
+          if (cur->getAddrAlign() > 0 && vma % cur->getAddrAlign() == 0)
+            alignAddress(pma, cur->getAddrAlign());
+      }
     } else if (hasFixedLMA) {
       // If the current segment has a fixed LMA address, then
       curLoadSegment->fixedLMA()->evaluateAndRaiseError();
@@ -303,9 +312,14 @@ bool GNULDBackend::createScriptProgramHdrs() {
     } else if (isStartOfSegment)
       is_previous_start_of_segment = true;
 
-    if (cur->isAlloc())
+    // Do not advance layout state for TBSS. TBSS occupies no file space and
+    // does not advance the dot counter, so letting it update prev or
+    // last_seen_alloc_section would cause the next real section to be placed
+    // relative to a phantom boundary.
+    if (cur->isAlloc() && !cur->isTBSS())
       last_seen_alloc_section = cur;
-    prev = cur;
+    if (!cur->isTBSS())
+      prev = cur;
 
     if (isNoLoad)
       noLoadSections.push_back(cur);
@@ -317,6 +331,10 @@ bool GNULDBackend::createScriptProgramHdrs() {
       if (cur->isWanted() || cur->wantedInOutput() ||
           (scriptvma && scriptvma.value())) {
         seg->append(*out);
+        // Always update segment flags, including for TBSS, so that a segment
+        // containing only TBSS sections gets the correct p_flags (PF_R|PF_W).
+        // Skipping this for TBSS would leave a PHDRS-defined TLS segment with
+        // p_flags=0 when no other section in that segment updates the flags.
         seg->updateFlagPhdr(getSegmentFlag(cur->getFlags()));
       }
       if (seg->isLoadSegment() && !config().options().isOMagic())

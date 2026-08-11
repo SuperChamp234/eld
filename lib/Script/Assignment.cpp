@@ -34,8 +34,6 @@ Assignment::Assignment(Level AssignmentLevel, Type AssignmentType,
       ExpressionValue(0), Name(Symbol), ExpressionToEvaluate(ScriptExpression),
       ThisSymbol(nullptr) {}
 
-
-
 void Assignment::dump(llvm::raw_ostream &Outs) const {
   bool CloseParen = true;
   switch (type()) {

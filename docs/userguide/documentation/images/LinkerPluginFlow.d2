@@ -1,0 +1,56 @@
+...@common.d2
+
+direction: down
+
+# Main flow nodes
+Setup.class: phase
+LoadLinkerPlugins.class: phase
+LinkPhase1.class: processing
+LinkPhase2.class: processing
+LinkPhase3.class: processing
+LinkPhase4.class: processing
+LinkPhase5.class: processing
+ReadInputs.class: phase
+RuleMatching.class: phase
+SectionMerging.class: phase
+PerformLayout.class: phase
+WriteOutput.class: phase
+
+# Main flow Labels
+LinkPhase1: ""
+LinkPhase2: ""
+LinkPhase3: ""
+LinkPhase4: ""
+LinkPhase5: ""
+LoadLinkerPlugins: Load Linker Plugins
+ReadInputs: Read Inputs
+RuleMatching: Rule Matching
+SectionMerging: Section Merging
+PerformLayout: Perform Layout
+WriteOutput: Write Output
+
+# Hook nodes
+Init.class: hook
+VisitSectionsAndSymbols.class: hook
+BeforeRuleMatching.class: hook
+BeforeSectionMerging.class: hook
+BeforePerformingLayout.class: hook
+BeforeWritingOutput.class: hook
+
+# Hook Labels
+VisitSectionsAndSymbols: Visit Sections And Symbols
+BeforeRuleMatching: Before Rule Matching
+BeforeSectionMerging: Before Section Merging
+BeforePerformingLayout: Before Performing Layout
+BeforeWritingOutput: Before Writing Output
+
+# Main pipeline flow
+Setup -> LoadLinkerPlugins -> LinkPhase1 -> ReadInputs -> LinkPhase2 -> RuleMatching -> LinkPhase3 -> SectionMerging -> LinkPhase4 -> PerformLayout -> LinkPhase5 -> WriteOutput: { class: flow }
+
+# Hook connections
+LinkPhase1 -> Init: { class: hook-flow }
+ReadInputs -> VisitSectionsAndSymbols: { class: hook-flow }
+LinkPhase2 -> BeforeRuleMatching: { class: hook-flow }
+LinkPhase3 -> BeforeSectionMerging: { class: hook-flow }
+LinkPhase4 -> BeforePerformingLayout: { class: hook-flow }
+LinkPhase5 -> BeforeWritingOutput: { class: hook-flow }

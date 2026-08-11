@@ -14,7 +14,6 @@
 #ifndef TARGET_ARM_ARMLDBACKEND_H
 #define TARGET_ARM_ARMLDBACKEND_H
 
-#include "ARMELFDynamic.h"
 #include "ARMGOT.h"
 #include "ARMPLT.h"
 #include "eld/Readers/ELFSection.h"
@@ -29,6 +28,8 @@ namespace eld {
 class LinkerConfig;
 class TargetInfo;
 class ARMAttributeFragment;
+class EXIDXFragment;
+class EXIDXSentinelFragment;
 
 //===----------------------------------------------------------------------===//
 /// ARMGNULDBackend - linker backend of ARM target of GNU ELF format
@@ -78,9 +79,8 @@ public:
   /// doPostLayout -Backend can do any needed modification after layout
   void doPostLayout() override;
 
-  /// dynamic - the dynamic section of the target machine.
-  /// Use co-variant return type to return its own dynamic section.
-  ARMELFDynamic *dynamic() override;
+  void reserveTargetDynamicEntries() override;
+  void applyTargetDynamicEntries() override;
 
   eld::Expected<uint64_t> emitSection(ELFSection *pSection,
                                       MemoryRegion &pRegion) const override;
@@ -115,8 +115,6 @@ public:
   bool ltoCallExternalAssembler(const std::string &Input,
                                 std::string RelocModel,
                                 const std::string &Output) override;
-
-  void defineIRelativeRange(ResolveInfo &pSym);
 
   uint64_t getSectLink(const ELFSection *S) const override;
 
@@ -228,8 +226,7 @@ public:
 
   bool handleRelocation(ELFSection *Section, Relocation::Type Type,
                         LDSymbol &Sym, uint32_t Offset,
-                        Relocation::Address Addend = 0,
-                        bool LastVisit = false) override;
+                        Relocation::Address Addend) override;
 
   std::size_t PLTEntriesCount() const override { return m_PLTMap.size(); }
 
@@ -243,11 +240,8 @@ private:
 private:
   Relocator *m_pRelocator;
 
-  ARMELFDynamic *m_pDynamic;
   LDSymbol *m_pEXIDXStart;
   LDSymbol *m_pEXIDXEnd;
-  LDSymbol *m_pIRelativeStart;
-  LDSymbol *m_pIRelativeEnd;
 
   //     variable name           :  ELF
   ELFSection *m_pEXIDX;        // .ARM.exidx
@@ -257,6 +251,11 @@ private:
   ELFSection *m_pARMAttributeSection;
   /// ARM Attribute Fragment
   ARMAttributeFragment *AttributeFragment;
+  /// Maps each .ARM.exidx input section to its EXIDXFragment.  Populated in
+  /// readSection; used by handleRelocation and sortEXIDX.
+  llvm::DenseMap<ELFSection *, EXIDXFragment *> m_EXIDXFragments;
+  ELFSection *m_pEXIDXSentinel = nullptr;
+  EXIDXSentinelFragment *m_pSentinelFrag = nullptr;
   llvm::DenseMap<ResolveInfo *, ARMGOT *> m_GOTMap;
   llvm::DenseMap<ResolveInfo *, ARMGOT *> m_GOTPLTMap;
   llvm::DenseMap<ResolveInfo *, ARMPLT *> m_PLTMap;

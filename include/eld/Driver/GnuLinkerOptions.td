@@ -315,6 +315,11 @@ defm sysroot : mDashDeprEq<"sysroot", "Set the system root">,
 def version : FF<"version">,
               HelpText<"Print the Linker version">,
               Group<grp_general>;
+// Unlike --version, -v prints the version banner but does not short-circuit
+// if input files are present.
+def v : Flag<["-"], "v">,
+       HelpText<"Print the Linker version and continue processing">,
+       Group<grp_general>;
 def repository_version : FF<"repository-version">,
                          HelpText<"Print the Linker Repository version">,
                          Group<grp_general>;
@@ -657,6 +662,14 @@ def no_warn_shared_textrel : FF<"no-warn-shared-textrel">,
                              HelpText<"Don't Warn if the linker adds a "
                                       "DT_TEXTREL">,
                              Group<grp_dynlib>;
+def warn_rwx_segments : FF<"warn-rwx-segments">,
+                        HelpText<"Warn if the linker creates a segment with "
+                                 "RWX permissions (default)">,
+                        Group<grp_general>;
+def no_warn_rwx_segments : FF<"no-warn-rwx-segments">,
+                           HelpText<"Silence warnings for segments with RWX "
+                                    "permissions">,
+                           Group<grp_general>;
 defm Bsymbolic : mDashComp<"Bsymbolic", "Bind references to global symbols to "
                            "the definition within the shared library">,
                  Group<grp_dynlib>;
@@ -1003,6 +1016,8 @@ def W : Joined<["-"], "W">,
              "whole-archive is enabled for any archive file\n"
              "\t\t\t -W[no-]osabi : display a warning when linking objects "
              "with different values for OS/ABI\n"
+             "\t\t\t -W[no-]version-script : display warnings detected while "
+             "processing version scripts\n"
             >,
         Group<grp_diagopts>;
 
@@ -1115,6 +1130,11 @@ defm no_emit_relocs
     : mDashDeprWithOpt<"no-emit-relocs", "no_emit_relocs", "Don't emit "
                        "relocations in the output file, applicable to "
                        "--emit-relocs-llvm option too">,
+      Group<grp_extendedopts>;
+def use_old_rule_matching
+    : FF<"use-old-rule-matching">,
+      HelpText<"Use the original (pre-optimization) linker script "
+               "rule-matching algorithm">,
       Group<grp_extendedopts>;
 defm script_options : mDashEq<"script-options", "script_options",
                               "Specify a match type, match-gnu/match-llvm">,
@@ -1440,7 +1460,7 @@ defm lto_sample_profile
 
 defm plugin_opt_sample_profile
     : mDashDeprEqOnlyAlias<"plugin-opt=sample-profile", "lto_sample_profile",
-                           "Alias for -lto-sample-profile=">,
+                           "Alias for --lto-sample-profile=">,
       Group<grp_ltooptions>;
 
 def lto_partitions : JJ<"lto-partitions=">,

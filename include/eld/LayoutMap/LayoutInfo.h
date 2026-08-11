@@ -232,18 +232,6 @@ public:
 
   void recordOutputFileSize(uint32_t Sz) { LinkStats.OutputFileSize = Sz; }
 
-  // FIXME: Destructor is redundant here.
-  ~LayoutInfo() { destroy(); }
-
-  // FIXME: This function is not required.
-  void destroy() {
-    InputActions.clear();
-    ScriptIncludes.clear();
-    ArchiveRecords.clear();
-    FragmentInfoMap.clear();
-    FragmentInfoVector.clear();
-  }
-
   void recordArchiveMember(Input *Origin, InputFile *Referred,
                            ArchiveFile::Symbol *ArchSym, LDSymbol *Sym);
 
@@ -364,7 +352,7 @@ public:
     return std::make_pair(memberPath, referred);
   }
 
-  std::string getWholeArchiveString() const { return "-whole-archive"; }
+  std::string getWholeArchiveString() const { return "--whole-archive"; }
 
   llvm::DenseSet<plugin::LinkerWrapper *> &getPlugins() { return Plugins; }
 
@@ -460,7 +448,7 @@ private:
   std::unordered_map<MergeableString *, std::vector<MergeableString *>>
       MergedStrings;
   LinkerConfig &ThisConfig;
-  /// It is required to compute relative path when -MapDetail
+  /// It is required to compute relative path when --MapDetail
   /// 'show-relative-path=...' is used.
   // It needs to be 'static' because LayoutInfo::setLayoutDetail member
   // function is static.

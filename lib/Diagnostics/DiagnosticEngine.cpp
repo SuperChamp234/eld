@@ -75,8 +75,7 @@ bool DiagnosticEngine::diagnose() {
       return false;
   }
 
-  // FIXME: Remove redundant '&& true'
-  return !Printer->getNumFatalErrors() && true;
+  return !Printer->getNumFatalErrors();
 }
 
 void DiagnosticEngine::finalize() {
@@ -196,6 +195,7 @@ DiagnosticEngine::Severity DiagnosticEngine::getDiagEngineSeverity(
     ADD_CASE(Fatal);
 #undef ADD_CASE
   }
+  llvm_unreachable("Unexpected severity!");
 }
 
 plugin::DiagnosticEntry::Severity DiagnosticEngine::getDiagEntrySeverity(
@@ -228,6 +228,25 @@ void DiagnosticEngine::ignoreLLVMError(llvm::Error E) {
   // llvm::Error must always be checked.
   if (IgnoreErr)
     ASSERT(!IgnoreErr, "ignoreErr must always be false");
+}
+
+bool DiagnosticEngine::isWarnMismatch(DiagIDType Id) {
+  if (Id == Diag::warn_mismatch_enum_size ||
+      Id == Diag::incompatible_architecture ||
+      Id == Diag::incompatible_input_architecture)
+    return true;
+
+  return false;
+}
+
+bool DiagnosticEngine::isErrorMismatch(DiagIDType Id) {
+  if (Id == Diag::err_mismatch_r9_use ||
+      Id == Diag::incompatible_architecture_versions ||
+      Id == Diag::attribute_parsing_error ||
+      Id == Diag::err_unrecognized_input_file || Id == Diag::invalid_elf_class)
+    return true;
+
+  return false;
 }
 
 // Initializes the default diagnostic IDs.

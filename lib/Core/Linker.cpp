@@ -208,6 +208,10 @@ bool Linker::link() {
     }
   }
 
+  // Skip if out file does not need to be emitted.
+  if (!ThisConfig->options().shouldEmitOutputFile())
+    return true;
+
   if (ThisModule->getPrinter()->isVerbose())
     ThisConfig->raise(Diag::emit_output_file)
         << ThisConfig->options().outputFileName();
@@ -369,13 +373,6 @@ bool Linker::normalize() {
     ThisConfig->setCodePosition(LinkerConfig::DynamicDependent);
   }
 
-  if ((ThisConfig->options().isPatchEnable() ||
-       ThisConfig->options().getPatchBase()) &&
-      !ThisConfig->isCodeStatic()) {
-    ThisConfig->raise(Diag::err_patch_not_static);
-    return false;
-  }
-
   setUnresolvePolicy(ThisConfig->options().reportUndefPolicy());
 
   {
@@ -486,10 +483,6 @@ bool Linker::resolve() {
     LinkerProgress->incrementAndDisplayProgress();
     ObjLinker->assignOutputSections(ThisModule->getObjectList());
 
-    // Mark internal sections created by the linker and set to discard if any.
-    LinkerProgress->incrementAndDisplayProgress();
-    ObjLinker->markDiscardFileFormatSections();
-
     // Targets can update any information, if they care about.
     LinkerProgress->incrementAndDisplayProgress();
     Backend->finishAssignOutputSections();
@@ -538,26 +531,6 @@ bool Linker::resolve() {
     }
   }
 
-  // When linking the patch, most relocations need to resolve to the PLT stub
-  // from the base image. The address of the stub is communicated as the value
-  // of the `__llvm_patchable_` absolute symbol.
-  if (ThisConfig->options().getPatchBase()) {
-    for (auto &G : ThisModule->getNamePool().getGlobals()) {
-      ResolveInfo *SymInfo = G.getValue();
-      // We look for an alias for EVERY symbol, not only for the patchable ones
-      // because, during symbol resolution, if a patchable symbol is redefined
-      // in the patch, its patchable definition from the base will be replaced
-      // with the definition from the patch, which may not carry the patchable
-      // attribute. This much depends on the details of the symbol resolution.
-      // It may be possible to propagate the attribute during resolution.
-      if (LDSymbol *PatchableAlias = ThisModule->getNamePool().findSymbol(
-              std::string("__llvm_patchable_") + SymInfo->name())) {
-        Backend->recordAbsolutePLT(SymInfo, PatchableAlias->resolveInfo());
-        SymInfo->setReserved(SymInfo->reserved() | Relocator::ReservePLT);
-      }
-    }
-  }
-
   LinkerProgress->incrementAndDisplayProgress();
   if (LinkerConfig::Object != ThisConfig->codeGenType()) {
     eld::RegisterTimer T("Scan Relocation Processing", "Relocation Processing",
@@ -601,6 +574,13 @@ bool Linker::resolve() {
     // properly.
     if (!ObjLinker->addDynamicSymbols())
       return false;
+  }
+
+  {
+    LinkerProgress->incrementAndDisplayProgress();
+    eld::RegisterTimer T("Size Dynamic Sections", "Perform Layout",
+                         ThisConfig->options().printTimingStats());
+    ObjLinker->sizeDynamic();
   }
 
   // Merge sections.
@@ -765,56 +745,53 @@ bool Linker::emit() {
   if (layoutInfo)
     layoutInfo->recordOutputFileSize(OutputFileSize);
 
+  std::error_code Ec;
+  int OutputFlag = 0;
+  if (Perm & 0x755)
+    OutputFlag = llvm::FileOutputBuffer::F_executable;
+  auto OutputOrError =
+      llvm::FileOutputBuffer::create(Path, OutputFileSize, OutputFlag);
+  // If there is an error, return with a fatal error message.
+  if (!OutputOrError) {
+    ThisConfig->raise(Diag::fatal_unwritable_output)
+        << Path << llvm::toString(OutputOrError.takeError());
+    return false;
+  }
   {
-    std::error_code Ec;
-    int OutputFlag = 0;
-    if (Perm & 0x755)
-      OutputFlag = llvm::FileOutputBuffer::F_executable;
-    auto OutputOrError =
-        llvm::FileOutputBuffer::create(Path, OutputFileSize, OutputFlag);
-    // If there is an error, return with a fatal error message.
-    if (!OutputOrError) {
-      ThisConfig->raise(Diag::fatal_unwritable_output)
-          << Path << llvm::toString(OutputOrError.takeError());
-      return false;
-    }
-    {
-      LinkerProgress->incrementAndDisplayProgress();
-      eld::RegisterTimer T("Write All Sections", "Emit Output File",
-                           ThisConfig->options().printTimingStats());
-      ObjLinker->emitOutput(*OutputOrError.get());
-    }
-
     LinkerProgress->incrementAndDisplayProgress();
-    eld::Expected<void> ExpPostProcess =
-        ObjLinker->postProcessing(*OutputOrError.get());
-    if (!ExpPostProcess) {
-      ThisConfig->raiseDiagEntry(std::move(ExpPostProcess.error()));
-      return false;
-    }
+    eld::RegisterTimer T("Write All Sections", "Emit Output File",
+                         ThisConfig->options().printTimingStats());
+    ObjLinker->emitOutput(*OutputOrError.get());
+  }
 
-    // Update Build ID and sync
-    eld::Expected<void> E =
-        Backend->finalizeAndEmitBuildID(*OutputOrError.get());
-    if (!E) {
-      ThisConfig->raiseDiagEntry(std::move(E.error()));
-      return false;
-    }
+  LinkerProgress->incrementAndDisplayProgress();
+  eld::Expected<void> ExpPostProcess =
+      ObjLinker->postProcessing(*OutputOrError.get());
+  if (!ExpPostProcess) {
+    ThisConfig->raiseDiagEntry(std::move(ExpPostProcess.error()));
+    return false;
+  }
 
-    {
-      LinkerProgress->incrementAndDisplayProgress();
-      eld::RegisterTimer T("Commit File", "Emit Output File",
-                           ThisConfig->options().printTimingStats());
-      if (auto E = (*OutputOrError)->commit()) {
-        ThisConfig->raise(Diag::unable_to_write_output_file)
-            << Path << llvm::toString(std::move(E));
-        return false;
-      }
+  // Update Build ID and sync
+  eld::Expected<void> E = Backend->finalizeAndEmitBuildID(*OutputOrError.get());
+  if (!E) {
+    ThisConfig->raiseDiagEntry(std::move(E.error()));
+    return false;
+  }
+
+  {
+    LinkerProgress->incrementAndDisplayProgress();
+    eld::RegisterTimer T("Commit File", "Emit Output File",
+                         ThisConfig->options().printTimingStats());
+    if (auto E = (*OutputOrError)->commit()) {
+      ThisConfig->raise(Diag::unable_to_write_output_file)
+          << Path << llvm::toString(std::move(E));
+      return false;
     }
   }
 
   LinkerProgress->incrementAndDisplayProgress();
-  if ((Path != "/dev/null") && (ThisConfig->options().verifyLink())) {
+  if (ThisConfig->options().verifyLink()) {
     llvm::sys::fs::file_status FileStatus;
     std::error_code Ec = llvm::sys::fs::status(Path, FileStatus);
     if (Ec != std::error_code()) {

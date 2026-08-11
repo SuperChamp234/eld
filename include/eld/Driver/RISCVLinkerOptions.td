@@ -55,6 +55,11 @@ def no_relax_tlsdesc
       HelpText<"Disable relaxing TLSDESC instruction sequences">,
       Group<grp_riscv_linker>;
 
+def no_relax_got
+    : Flag<["--"], "no-relax-got">,
+      HelpText<"Disable relaxing GOT load instruction sequences">,
+      Group<grp_riscv_linker>;
+
 def riscv_relax : Flag<["--"], "relax">,
                   HelpText<"Enable relaxation (default behavior)">,
                   Group<grp_riscv_linker>;
@@ -63,9 +68,14 @@ def relax_tbljal
     : Flag<["--"], "relax-tbljal">,
       HelpText<"Enable conversion of call/jump instructions to Zcmt table jump instructions (cm.jt/cm.jalt)">,
       Group<grp_riscv_linker>;
+def relax_tbljal_eq
+    : Joined<["--"], "relax-tbljal=">,
+      HelpText<"Enable conversion of call/jump instructions to table jump instructions for zcmt or xqccmt (default: zcmt)">,
+      MetaVarName<"<zcmt|xqccmt>">,
+      Group<grp_riscv_linker>;
 def no_relax_tbljal
     : Flag<["--"], "no-relax-tbljal">,
-      HelpText<"Disable conversion of call/jump instructions to Zcmt table jump instructions (default behavior)">,
+      HelpText<"Disable conversion of call/jump instructions to table jump instructions (default behavior)">,
       Group<grp_riscv_linker>;
 def enable_bss_mixing : Flag<["--"], "enable-bss-mixing">,
                         HelpText<"Enable mixing BSS/NonBSS sections">,
@@ -80,14 +90,3 @@ def keep_labels : Flag<["--"], "keep-labels">,
                   HelpText<"Keep all local labels for debugging purposes">,
                   Group<grp_riscv_linker>;
 
-//===----------------------------------------------------------------------===//
-/// Patching
-//===----------------------------------------------------------------------===//
-def grp_patch : OptionGroup<"opts">, HelpText<"Symbol Patching">;
-def patch_enable : Flag<["--"], "patch-enable">,
-                   HelpText<"Enable symbol patching using indirection">,
-                   Group<grp_patch>;
-
-defm patch_base : mDashEq<"patch-base", "patch_base",
-                          "Specify base image to generate patch for">,
-                  Group<grp_patch>;

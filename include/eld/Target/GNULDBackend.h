@@ -17,6 +17,7 @@
 #ifdef ELD_ENABLE_SYMBOL_VERSIONING
 #include "eld/Input/ELFDynObjectFile.h"
 #endif
+#include "eld/Fragment/GOT.h"
 #include "eld/Object/ObjectBuilder.h"
 #include "eld/Readers/CommonELFSection.h"
 #include "eld/Readers/ELFExecObjParser.h"
@@ -42,6 +43,9 @@
 namespace eld {
 
 class BuildIDFragment;
+class DynamicFragment;
+class DynStrFragment;
+class DynSymFragment;
 class BinaryFileParser;
 class BitcodeReader;
 class BranchIslandFactory;
@@ -51,7 +55,6 @@ class SFrameSection;
 class ELFDynamic;
 class ELFDynObjFileFormat;
 class ELFExecFileFormat;
-class ELFFileFormat;
 class ELFObjectFile;
 class ELFObjectFileFormat;
 class ELFSegmentFactory;
@@ -94,7 +97,7 @@ public:
     uint64_t offset = 0;
   };
 
-  typedef std::tuple<ResolveInfo::Type, uint64_t, InputFile *, bool> SymDefInfo;
+  typedef std::tuple<ResolveInfo::Type, uint64_t, InputFile *> SymDefInfo;
 
   // Based on Kind in LDFileFormat to define basic section orders for ELF,
   // and refer gold linker to add more enumerations to handle Regular and
@@ -159,7 +162,15 @@ public:
   /// initStdSections - initialize standard sections of the output file.
   virtual eld::Expected<void> initStdSections();
 
-  virtual ELFFileFormat *getOutputFormat() const;
+  /// createOutputSection - helper to create and register an output section
+  ELFSection *createOutputSection(llvm::StringRef pName,
+                                  LDFileFormat::Kind pKind, uint32_t pType,
+                                  uint32_t pFlag, uint32_t pAlign);
+
+  ELFSection *getShStrTab() const { return m_pShStrTab; }
+  ELFSection *getStrTab() const { return m_pStrTab; }
+  ELFSection *getSymTab() const { return m_pSymTab; }
+  ELFSection *getSymTabShndxr() const { return m_pSymTabShndxr; }
 
   Module &getModule() const { return m_Module; }
 
@@ -171,6 +182,18 @@ public:
   void insertTimingFragmentStub();
 
   TimingFragment *getTimingFragment() const { return m_pTimingFragment; }
+
+  DynStrFragment *getDynStrFragment() const { return m_pDynStrFrag; }
+
+  ELFSection *getDynStrSection() const { return m_pDynStrSection; }
+
+  DynSymFragment *getDynSymFragment() const { return m_pDynSymFrag; }
+
+  ELFSection *getDynSymSection() const { return m_pDynSymSection; }
+
+  DynamicFragment *getDynamicFragment() const { return m_pDynamicFrag; }
+
+  ELFSection *getDynamicSection() const { return m_pDynamicSection; }
 
   // -----  target symbols ----- //
   /// initStandardSymbols - initialize standard symbols.
@@ -195,6 +218,16 @@ public:
 
   /// finalizeTargetSymbols - set the value of target symbols
   virtual bool finalizeTargetSymbols() = 0;
+
+  /// defineIRelativeRange - define the __rel[a]_iplt_start/__rel[a]_iplt_end
+  /// range symbols. This must run before scanRelocations so
+  /// that any GOT entries created for these symbols are populated with the
+  /// correct symbol values.
+  void defineIRelativeRange();
+
+  /// finalizeIRelativeRange - set the values of the __rel[a]_iplt range symbols
+  /// to bound the PLT relocation output section.
+  void finalizeIRelativeRange();
 
   /// finalizeTLSSymbol - set the value of a TLS symbol
   virtual uint64_t finalizeTLSSymbol(LDSymbol *pSymbol);
@@ -229,6 +262,8 @@ public:
 
   virtual void sizeDynamic();
 
+  void reserveDynamic();
+
   virtual void finalizeBeforeWrite();
 
   /// emitSection - emit target-dependent section data
@@ -237,9 +272,6 @@ public:
 
   /// emitRegNamePools - emit regular name pools - .symtab, .strtab
   virtual eld::Expected<void> emitRegNamePools(llvm::FileOutputBuffer &pOutput);
-
-  /// emitNamePools - emit dynamic name pools - .dyntab, .dynstr, .hash
-  virtual bool emitDynNamePools(llvm::FileOutputBuffer &pOutput);
 
   void setHasStaticTLS(bool pVal = true) { m_bHasStaticTLS = pVal; }
 
@@ -443,8 +475,6 @@ public:
 
   virtual void initTargetSymbols() = 0;
 
-  virtual void initPatchSections(ELFObjectFile &) {}
-
   /// getRelEntrySize - the size in BYTE of rel type relocation
   virtual size_t getRelEntrySize() = 0;
 
@@ -456,6 +486,8 @@ public:
   uint64_t getSymbolSize(LDSymbol *pSymbol) const;
 
   uint64_t getSymbolInfo(LDSymbol *pSymbol) const;
+
+  uint8_t getSymbolBinding(LDSymbol *pSymbol) const;
 
   uint64_t getSymbolValue(LDSymbol *pSymbol) const;
 
@@ -477,6 +509,8 @@ public:
   /// createScriptProgramHdrs - Create program headers mentioned in Linker
   /// Script
   bool createScriptProgramHdrs();
+
+  void warnRWXSegments();
 
   bool assignOffsets(uint64_t Offset);
 
@@ -545,8 +579,21 @@ public:
   /// postProcessing - Backend can do any needed modification in the final stage
   virtual eld::Expected<void> postProcessing(llvm::FileOutputBuffer &pOutput);
 
+  /// copy plugin provided replacement content (registered via
+  /// LinkerWrapper::replaceSymbolContent) into the output
+  /// buffer. This must run before relocations are synced so that relocations
+  /// targeting the replaced symbol are applied on top of the new content rather
+  /// than being clobbered by it.
+  void applyPluginFragmentReplacements(llvm::FileOutputBuffer &Output);
+
   /// dynamic - the dynamic section of the target machine.
-  virtual ELFDynamic *dynamic() = 0;
+  virtual ELFDynamic *dynamic() { return m_pDynamic; }
+
+  /// reserveTargetDynamicEntries - reserve target-specific .dynamic entries.
+  virtual void reserveTargetDynamicEntries() {}
+
+  /// applyTargetDynamicEntries - apply target-specific .dynamic entries.
+  virtual void applyTargetDynamicEntries() {}
 
   /// relax - the relaxation pass
   virtual bool relax();
@@ -598,14 +645,12 @@ public:
 
   void addSymbolScope(ResolveInfo *R, VersionSymbol *V) { SymbolScopes[R] = V; }
 
-#ifdef ELD_ENABLE_SYMBOL_VERSIONING
   VersionSymbol *getSymbolScope(const ResolveInfo *R) const {
     auto it = SymbolScopes.find(R);
     if (it != SymbolScopes.end())
       return it->second;
     return nullptr;
   }
-#endif
 
   std::vector<Relocation *> &getInternalRelocs() { return m_InternalRelocs; }
 
@@ -646,10 +691,9 @@ public:
 
   void addSymDefProvideSymbol(llvm::StringRef symName,
                               ResolveInfo::Type resolverType, uint64_t symVal,
-                              InputFile *file, bool isPatchable = false) {
+                              InputFile *file) {
     if (!m_SymDefProvideMap.count(symName))
-      m_SymDefProvideMap[symName] =
-          std::make_tuple(resolverType, symVal, file, isPatchable);
+      m_SymDefProvideMap[symName] = std::make_tuple(resolverType, symVal, file);
   }
 
   LDSymbol *canProvideSymbol(ResolveInfo *R);
@@ -672,15 +716,15 @@ public:
   void reportErrorIfPLTIsDiscarded(ResolveInfo *R) const;
   void reportErrorIfGOTPLTIsDiscarded(ResolveInfo *R) const;
 
+  void traceGOTCreation(GOT::GOTType T, const ResolveInfo *R) const;
+
+  void tracePLTCreation(const ResolveInfo *R) const;
+
   virtual LDSymbol *getGOTSymbol() const { return m_pGOTSymbol; }
 
   void recordRelativeReloc(Relocation *R, const Relocation *N) {
     m_RelativeRelocMap[N] = R;
   }
-
-  // Patching sections.
-  ELFSection *getGOTPatch() const;
-  ELFSection *getRelaPatch() const;
 
   // -----------------Segment Size Helper --------------------------------
   bool isOffsetAssigned() const { return m_OffsetsAssigned; }
@@ -703,8 +747,7 @@ public:
   /// handled here, false otherwise.
   virtual bool handleRelocation(ELFSection *pSection, Relocation::Type pType,
                                 LDSymbol &pSym, uint32_t pOffset,
-                                Relocation::Address pAddend = 0,
-                                bool pLastVisit = false) {
+                                Relocation::Address pAddend) {
     return false;
   }
 
@@ -877,11 +920,6 @@ public:
   bool isPhdrNeeded() const { return m_NeedPhdr; }
 
   // ----------------------- Patching -----------------------------------
-  // Absolute PLTs are used to redirect symbols in patch builds.
-  void recordAbsolutePLT(ResolveInfo *, const ResolveInfo *);
-
-  const ResolveInfo *findAbsolutePLT(ResolveInfo *I) const;
-
   // Symbol versioning helpers
 #ifdef ELD_ENABLE_SYMBOL_VERSIONING
   void initSymbolVersioningSections();
@@ -935,9 +973,6 @@ protected:
   /// Returns the name of the common symbol associated with the section
   /// 'commonSection'.
   std::string getCommonSymbolName(const CommonELFSection *commonSection) const;
-
-  /// FIXME: This is not implemented anywhere
-  bool evaluateOutputSectionDataCmds();
 
 private:
   uint32_t getOneEhdrSize() const;
@@ -1093,7 +1128,11 @@ private:
 protected:
   Module &m_Module;
 
-  ELFFileFormat *m_pFileFormat = nullptr;
+  // Standard output sections (.shstrtab, .symtab, .strtab, .symtab_shndxr)
+  ELFSection *m_pShStrTab = nullptr;
+  ELFSection *m_pStrTab = nullptr;
+  ELFSection *m_pSymTab = nullptr;
+  ELFSection *m_pSymTabShndxr = nullptr;
 
   // TargetInfo
   TargetInfo *m_pInfo = nullptr;
@@ -1170,6 +1209,19 @@ protected:
   ELFSection *m_pBuildIDSection = nullptr;
   BuildIDFragment *m_pBuildIDFragment = nullptr;
 
+  // Dynamic string table
+  ELFSection *m_pDynStrSection = nullptr;
+  DynStrFragment *m_pDynStrFrag = nullptr;
+
+  // Dynamic symbol table
+  ELFSection *m_pDynSymSection = nullptr;
+  DynSymFragment *m_pDynSymFrag = nullptr;
+
+  // Dynamic section
+  ELFSection *m_pDynamicSection = nullptr;
+  DynamicFragment *m_pDynamicFrag = nullptr;
+  ELFDynamic *m_pDynamic = nullptr;
+
   // Start Offset.
   int64_t m_StartOffset = 0;
 
@@ -1212,8 +1264,10 @@ protected:
   LDSymbol *m_pGOTSymbol = nullptr;
   llvm::DenseMap<const Relocation *, Relocation *> m_RelativeRelocMap;
 
-  // Patching.
-  llvm::DenseMap<ResolveInfo *, const ResolveInfo *> m_AbsolutePLTMap;
+  // __rel[a]_iplt_start / __rel[a]_iplt_end range symbols for static IFunc
+  // (R_*_IRELATIVE) support.
+  LDSymbol *m_pIRelativeStart = nullptr;
+  LDSymbol *m_pIRelativeEnd = nullptr;
 
   std::optional<uint64_t> m_ImageStartVMA;
 

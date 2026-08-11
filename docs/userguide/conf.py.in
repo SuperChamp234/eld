@@ -16,6 +16,7 @@ from pathlib import Path
 THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = (THIS_DIR / ".." / "..").resolve()
 
+sys.path.insert(0, str(THIS_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
 
@@ -26,7 +27,8 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.todo",
     "sphinx.ext.ifconfig",
-    "sphinx.ext.graphviz",
+    "myst_parser",
+    "sphinxext_d2",
 ]
 
 _BREATHE_XML_DIR = os.environ.get("ELD_BREATHE_XML_DIR")
@@ -42,7 +44,10 @@ if _BREATHE_XML_DIR:
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "_build_*", "**/_build", "**/_build_*"]
 
-source_suffix = ".rst"
+source_suffix = {
+    ".rst": "restructuredtext",
+    ".md": "markdown",
+}
 master_doc = "index"
 
 language = "en"
@@ -75,9 +80,9 @@ html_meta = {
     ),
 }
 
-# Graphviz configuration
-graphviz_dot = "/usr/bin/dot"
-graphviz_output_format = "svg"
+# D2 diagram configuration
+d2_executable = "d2"
+d2_layout = "elk"
 
 def _read_env_breathe_projects() -> dict[str, str]:
     """
@@ -97,40 +102,6 @@ def _read_env_breathe_projects() -> dict[str, str]:
 if "breathe" in extensions:
     breathe_projects = _read_env_breathe_projects()
     breathe_default_project = next(iter(breathe_projects.keys()))
-
-
-# Optional PDF builder (rst2pdf) for generating a single userguide PDF.
-try:
-    import rst2pdf.pdfbuilder  # noqa: F401
-
-    extensions.append("rst2pdf.pdfbuilder")
-    pdf_documents = [
-        ("index", "ELD_UserGuide", "ELD User Guide", "Qualcomm Technologies, Inc."),
-    ]
-    pdf_stylesheets = ["sphinx"]
-    pdf_style_path = [str(THIS_DIR / "_static")]
-    
-    # PDF configuration to fix warnings
-    pdf_break_level = 1
-    pdf_inline_footnotes = True
-    pdf_use_index = True
-    pdf_use_modindex = True
-    pdf_use_coverpage = True
-    pdf_fit_mode = "shrink"
-    pdf_break_side = "any"
-    pdf_smartquotes = 2
-    
-    # Fix code block width issues
-    pdf_fit_background_mode = "scale"
-    pdf_default_dpi = 72
-    pdf_compressed = True
-    
-    # Define custom styles to fix undefined style warnings
-    pdf_style_path.append(str(THIS_DIR))
-    
-except Exception:
-    # rst2pdf is optional; if it's not available, skip PDF builder.
-    pdf_documents: list = []
 
 
 def setup(app):

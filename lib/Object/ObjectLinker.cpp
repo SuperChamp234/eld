@@ -63,7 +63,6 @@
 #include "eld/Support/Utils.h"
 #include "eld/SymbolResolver/IRBuilder.h"
 #include "eld/SymbolResolver/ResolveInfo.h"
-#include "eld/Target/ELFFileFormat.h"
 #include "eld/Target/GNULDBackend.h"
 #include "eld/Target/LDFileFormat.h"
 #include "eld/Target/Relocator.h"
@@ -176,12 +175,6 @@ bool ObjectLinker::initStdSections() {
   if (LinkerConfig::Object != ThisConfig.codeGenType()) {
     getTargetBackend().initDynamicSections(
         *getTargetBackend().getDynamicSectionHeadersInputFile());
-
-    // Note that patch section are only created in one internal input file
-    // (DynamicSectionHeadersInputFile).
-    if (ThisConfig.options().isPatchEnable())
-      getTargetBackend().initPatchSections(
-          *getTargetBackend().getDynamicSectionHeadersInputFile());
   }
 
   // Initialize symbol versioning sections only for dynamic artifacts when
@@ -247,6 +240,12 @@ bool ObjectLinker::readLinkerScript(InputFile *Input) {
     if (!ThisConfig.getDiagEngine()->diagnose())
       return false;
   }
+
+  // A -T script may embed its own VERSION{} block. Record it now so
+  // parseVersionScript() can register its nodes later, once the target
+  // backend is guaranteed to be initialized, which is not yet the case here.
+  if (S->getVersionScript())
+    ThisModule->addLinkerScriptVersionScript(S->getVersionScript());
 
   Input->setUsed(true);
 
@@ -322,19 +321,6 @@ bool ObjectLinker::normalize() {
     return false;
   }
 
-  // Create patch base input.
-  if (const auto &PatchBase = ThisConfig.options().getPatchBase()) {
-    Input *Input = make<eld::Input>(*PatchBase, ThisConfig.getDiagEngine());
-    // Resolve the path.
-    if (!Input->resolvePath(ThisConfig)) {
-      ThisModule->setFailure(true);
-      return false;
-    }
-    Input->getAttribute().setPatchBase();
-    if (!readAndProcessInput(Input, MPostLtoPhase))
-      return false;
-  }
-
   if (!isBackendInitialized()) {
     ThisConfig.raise(Diag::error_unknown_target_emulation);
     return false;
@@ -351,121 +337,238 @@ bool ObjectLinker::normalize() {
 // FIXME: We should maybe parse version script after reading LTO-generated
 // object files.
 bool ObjectLinker::parseVersionScript() {
-  if (!ThisConfig.options().hasVersionScript())
-    return true;
-  LayoutInfo *layoutInfo = ThisModule->getLayoutInfo();
-  for (const auto &List : ThisConfig.options().getVersionScripts()) {
-    Input *VersionScriptInput =
-        eld::make<Input>(List, ThisConfig.getDiagEngine(), Input::Script);
-    if (!VersionScriptInput->resolvePath(ThisConfig))
-      return false;
-    // Create an Input file and set the input file to be of kind DynamicList
-    InputFile *VersionScriptInputFile =
-        InputFile::create(VersionScriptInput, InputFile::GNULinkerScriptKind,
-                          ThisConfig.getDiagEngine());
-    addInputFileToTar(VersionScriptInputFile, eld::MappingFile::VersionScript);
-    VersionScriptInput->setInputFile(VersionScriptInputFile);
-    // Record the dynamic list script in the Map file.
-    if (layoutInfo)
-      layoutInfo->recordVersionScript(List);
-    // Read the dynamic List file
-    ScriptFile VersionScriptReader(
-        ScriptFile::VersionScript, *ThisModule,
-        *(llvm::dyn_cast<eld::LinkerScriptFile>(VersionScriptInputFile)),
-        ThisModule->getIRBuilder()->getInputBuilder());
-    bool SuccessFullInParse =
-        getScriptReader()->readScript(ThisConfig, VersionScriptReader);
-    if (!SuccessFullInParse)
-      return false;
-    ThisModule->addVersionScript(VersionScriptReader.getVersionScript());
-    for (auto &VersionScriptNode :
-         VersionScriptReader.getVersionScript()->getNodes()) {
-      if (!VersionScriptNode->isAnonymous()) {
-#ifdef ELD_ENABLE_SYMBOL_VERSIONING
-        getTargetBackend().setShouldEmitVersioningSections(true);
-#else
-        ThisConfig.raise(Diag::unsupported_version_node)
-            << VersionScriptInput->decoratedPath();
-        continue;
-#endif
-      }
-      if (VersionScriptNode->hasDependency()) {
-        ThisConfig.raise(Diag::unsupported_dependent_node)
-            << VersionScriptNode->getName()
-            << VersionScriptInput->decoratedPath();
-#ifndef ELD_ENABLE_SYMBOL_VERSIONING
-        continue;
-#endif
-      }
-      // FIXME: Why did we reach here at all if the version script parsing
-      // failed? Shouldn't we have exited before reaching here?
-      if (VersionScriptNode->hasError()) {
-        ThisConfig.raise(Diag::error_parsing_version_script)
-            << VersionScriptInput->decoratedPath();
+  if (ThisConfig.options().hasVersionScript()) {
+    LayoutInfo *layoutInfo = ThisModule->getLayoutInfo();
+    for (const auto &List : ThisConfig.options().getVersionScripts()) {
+      Input *VersionScriptInput =
+          eld::make<Input>(List, ThisConfig.getDiagEngine(), Input::Script);
+      if (!VersionScriptInput->resolvePath(ThisConfig))
         return false;
-      }
-      ThisModule->addVersionScriptNode(VersionScriptNode);
+      // Create an Input file and set the input file to be of kind DynamicList
+      InputFile *VersionScriptInputFile =
+          InputFile::create(VersionScriptInput, InputFile::GNULinkerScriptKind,
+                            ThisConfig.getDiagEngine());
+      addInputFileToTar(VersionScriptInputFile,
+                        eld::MappingFile::VersionScript);
+      VersionScriptInput->setInputFile(VersionScriptInputFile);
+      // Record the dynamic list script in the Map file.
+      if (layoutInfo)
+        layoutInfo->recordVersionScript(List);
+      // Read the dynamic List file
+      ScriptFile VersionScriptReader(
+          ScriptFile::VersionScript, *ThisModule,
+          *(llvm::dyn_cast<eld::LinkerScriptFile>(VersionScriptInputFile)),
+          ThisModule->getIRBuilder()->getInputBuilder());
+      bool SuccessFullInParse =
+          getScriptReader()->readScript(ThisConfig, VersionScriptReader);
+      if (!SuccessFullInParse)
+        return false;
+      ThisModule->addVersionScript(VersionScriptReader.getVersionScript());
+      if (!registerVersionScriptNodes(VersionScriptReader.getVersionScript(),
+                                      VersionScriptInput->decoratedPath()))
+        return false;
     }
   }
-  auto &SymbolScopes = getTargetBackend().symbolScopes();
-  auto &NP = ThisModule->getNamePool();
+
+  // VersionScript objects parsed from a VERSION{} block embedded directly
+  // inside a -T linker script (recorded by readLinkerScript(), which runs
+  // before the target backend is guaranteed to exist). Process them here,
+  // where registerVersionScriptNodes() can safely touch the backend.
+  for (const VersionScript *VS : ThisModule->getLinkerScriptVersionScripts()) {
+    if (!registerVersionScriptNodes(
+            VS, VS->getInputFile()->getInput()->decoratedPath()))
+      return false;
+  }
+
+  assignVersionNodesToSymbols();
+  return true;
+}
+
+bool ObjectLinker::registerVersionScriptNodes(const VersionScript *VS,
+                                              llvm::StringRef DecoratedPath) {
+  for (auto &VersionScriptNode : VS->getNodes()) {
+    if (!VersionScriptNode->isAnonymous()) {
 #ifdef ELD_ENABLE_SYMBOL_VERSIONING
-  DemangledNamesMap DemangledNames;
+      getTargetBackend().setShouldEmitVersioningSections(true);
+#else
+      ThisConfig.raise(Diag::unsupported_version_node) << DecoratedPath;
+      continue;
 #endif
+    }
+    if (VersionScriptNode->hasDependency()) {
+      ThisConfig.raise(Diag::unsupported_dependent_node)
+          << VersionScriptNode->getName() << DecoratedPath;
+#ifndef ELD_ENABLE_SYMBOL_VERSIONING
+      continue;
+#endif
+    }
+    // FIXME: Why did we reach here at all if the version script parsing
+    // failed? Shouldn't we have exited before reaching here?
+    if (VersionScriptNode->hasError()) {
+      ThisConfig.raise(Diag::error_parsing_version_script) << DecoratedPath;
+      return false;
+    }
+    ThisModule->addVersionScriptNode(VersionScriptNode);
+  }
+  return true;
+}
+
+void ObjectLinker::assignVersionNodesToSymbols() {
+  eld::RegisterTimer T("Assign Version Nodes to Symbols", "Version Scripts",
+                       ThisModule->getConfig().options().printTimingStats());
+  auto &NP = ThisModule->getNamePool();
+  auto &VersionNodes = ThisModule->getVersionScriptNodes();
+
+  if (VersionNodes.empty())
+    return;
+
+  auto canAssignVersionNode = [](const ResolveInfo &R) {
+    return (R.isDefine() || R.isCommon()) && !R.isDyn();
+  };
+
+  auto getVersionDesc = [](const VersionSymbol *VS) -> std::string {
+    auto *node = VS->getBlock()->getNode();
+    if (node->isAnonymous())
+      return VS->isGlobal() ? "VER_NDX_GLOBAL" : "VER_NDX_LOCAL";
+    return (node->getName() + (VS->isGlobal() ? "(global)" : "(local)")).str();
+  };
+
+  std::vector<ResolveInfo *> VSApplicableSymbols;
   for (auto &G : NP.getGlobals()) {
     ResolveInfo *R = G.getValue();
-    for (auto &VersionScriptNode : ThisModule->getVersionScriptNodes()) {
-      if (VersionScriptNode->getGlobalBlock()) {
-        for (auto *Sym : VersionScriptNode->getGlobalBlock()->getSymbols()) {
+    if (canAssignVersionNode(*R))
+      VSApplicableSymbols.push_back(R);
+  }
+  if (VSApplicableSymbols.empty())
+    return;
+
+  // Precompute flat pattern lists in precedence order. Each list is walked
+  // per-symbol during assignment, so each thread reads a shared read-only
+  // view and mutates only its own slot in Results below.
+  //
+  //   Phase 1 (exact patterns, first-wins across nodes; warns on any later
+  //     exact match): forward node order, global-then-local within a node.
+  //   Phase 2 (non-star wildcards, last-wins): reverse node order,
+  //     local-then-global within a node.
+  //   Phase 3 (match-all `*`, last-wins): same ordering as Phase 2.
+  std::vector<VersionSymbol *> ExactPatterns;
+  std::vector<VersionSymbol *> WildcardPatterns;
+  std::vector<VersionSymbol *> MatchAllPatterns;
+
+  auto isExactP = [](const VersionSymbol *vs) {
+    return !vs->getSymbolPattern()->hasGlob();
+  };
+  auto isNonStarWildcardP = [](const VersionSymbol *vs) {
+    const auto *p = vs->getSymbolPattern();
+    return p->hasGlob() && !p->isMatchAll();
+  };
+  auto isMatchAllP = [](const VersionSymbol *vs) {
+    return vs->getSymbolPattern()->isMatchAll();
+  };
+
+  auto pushFiltered = [](VersionScriptBlock *block, auto filter,
+                         std::vector<VersionSymbol *> &out) {
+    if (!block)
+      return;
+    for (auto *vs : block->getSymbols())
+      if (filter(vs))
+        out.push_back(vs);
+  };
+
+  for (const auto *N : VersionNodes) {
+    pushFiltered(N->getGlobalBlock(), isExactP, ExactPatterns);
+    pushFiltered(N->getLocalBlock(), isExactP, ExactPatterns);
+  }
+  for (auto It = VersionNodes.rbegin(); It != VersionNodes.rend(); ++It) {
+    pushFiltered((*It)->getLocalBlock(), isNonStarWildcardP, WildcardPatterns);
+    pushFiltered((*It)->getGlobalBlock(), isNonStarWildcardP, WildcardPatterns);
+  }
+  for (auto It = VersionNodes.rbegin(); It != VersionNodes.rend(); ++It) {
+    pushFiltered((*It)->getLocalBlock(), isMatchAllP, MatchAllPatterns);
+    pushFiltered((*It)->getGlobalBlock(), isMatchAllP, MatchAllPatterns);
+  }
+
+  // Per-symbol decision. Reads only shared read-only state (NamePool,
+  // pattern lists, config flags); writes only to a caller-provided slot.
+  // Emits diagnostics via ThisConfig.raise which is thread-safe.
+  auto assignOneSymbol = [&](ResolveInfo *R) -> VersionSymbol * {
 #ifdef ELD_ENABLE_SYMBOL_VERSIONING
-          bool isMatched = Sym->matched(*R, NP, DemangledNames);
-#else
-          bool isMatched = Sym->getSymbolPattern()->matched(*R);
+    DemangledNamesMap demangledName;
 #endif
-          if (isMatched) {
-            getTargetBackend().addSymbolScope(R, Sym);
+    auto matchesR = [&](VersionSymbol *vs) {
 #ifdef ELD_ENABLE_SYMBOL_VERSIONING
-            if (ThisConfig.getPrinter()->traceSymbolVersioning())
-              ThisConfig.raise(Diag::trace_version_script_matched_scope)
-                  << "global" << R->name();
-            break;
-#endif
-          } // end Symbol Match
-        } // end Symbols
-      } // end Global
-      if (SymbolScopes.find(R) != SymbolScopes.end()) {
-#ifdef ELD_ENABLE_SYMBOL_VERSIONING
-        break;
+      return vs->matched(*R, NP, demangledName);
 #else
+      return vs->getSymbolPattern()->matched(*R);
+#endif
+    };
+
+    auto trace = [&](VersionSymbol *scope) -> VersionSymbol * {
+#ifdef ELD_ENABLE_SYMBOL_VERSIONING
+      if (scope && ThisConfig.getPrinter()->traceSymbolVersioning())
+        ThisConfig.raise(Diag::trace_version_script_matched_scope)
+            << R->name() << getVersionDesc(scope);
+#endif
+      return scope;
+    };
+
+    // Phase 1: exact patterns, first-wins. Keep scanning after the first
+    // match so that any later exact match in a subsequent node emits the
+    // reassignment warning.
+    VersionSymbol *scope = nullptr;
+    for (VersionSymbol *vs : ExactPatterns) {
+      if (!matchesR(vs))
         continue;
-#endif
+      if (!scope) {
+        scope = vs;
+      } else if (ThisConfig.showVersionScriptWarnings()) {
+        InputFile *verSymInputFile =
+            vs->getBlock()->getNode()->getVersionScript().getInputFile();
+        ThisConfig.raise(Diag::warn_version_script_reassign)
+            << verSymInputFile->getInput()->decoratedPath() << R->name()
+            << getVersionDesc(scope) << getVersionDesc(vs);
       }
-      if (VersionScriptNode->getLocalBlock()) {
-        for (auto *Sym : VersionScriptNode->getLocalBlock()->getSymbols()) {
-#ifdef ELD_ENABLE_SYMBOL_VERSIONING
-          bool isMatched = Sym->matched(*R, NP, DemangledNames);
-#else
-          bool isMatched = Sym->getSymbolPattern()->matched(*R);
-#endif
-          if (isMatched) {
-            getTargetBackend().addSymbolScope(R, Sym);
-#ifdef ELD_ENABLE_SYMBOL_VERSIONING
-            if (ThisConfig.getPrinter()->traceSymbolVersioning())
-              ThisConfig.raise(Diag::trace_version_script_matched_scope)
-                  << "local" << R->name();
-            break;
-#endif
-          } // end Symbol Match
-        } // end Symbols
-      } // end Local
-#ifdef ELD_ENABLE_SYMBOL_VERSIONING
-      if (SymbolScopes.find(R) != SymbolScopes.end()) {
-        break;
-      }
-#endif
-    } // end all Nodes
-  } // end Globals
-  return true;
+    }
+    if (scope)
+      return trace(scope);
+
+    // Phase 2: non-star wildcards, last-wins.
+    for (VersionSymbol *vs : WildcardPatterns)
+      if (matchesR(vs))
+        return trace(vs);
+
+    // Phase 3: match-all, last-wins.
+    for (VersionSymbol *vs : MatchAllPatterns)
+      if (matchesR(vs))
+        return trace(vs);
+
+    return nullptr;
+  };
+
+  std::vector<VersionSymbol *> Results(VSApplicableSymbols.size(), nullptr);
+
+  bool useThreads = ThisConfig.options().numThreads() > 1 &&
+                    ThisConfig.isAssignVersionScriptNodesMultiThreaded();
+  if (!useThreads) {
+    if (ThisModule->getPrinter()->traceThreads())
+      ThisConfig.raise(Diag::threads_disabled) << "AssignVersionScriptNodes";
+    for (size_t i = 0; i < VSApplicableSymbols.size(); ++i)
+      Results[i] = assignOneSymbol(VSApplicableSymbols[i]);
+  } else {
+    if (ThisModule->getPrinter()->traceThreads())
+      ThisConfig.raise(Diag::threads_enabled)
+          << "AssignVersionScriptNodes" << ThisConfig.options().numThreads();
+    llvm::parallelFor(0, VSApplicableSymbols.size(), [&](size_t i) {
+      Results[i] = assignOneSymbol(VSApplicableSymbols[i]);
+    });
+  }
+
+  // Serial merge: writes to SymbolScopes are single-threaded. Preserves the
+  // hash-map's non-concurrent-insert invariant and keeps the diff minimal.
+  for (size_t i = 0; i < VSApplicableSymbols.size(); ++i) {
+    if (Results[i])
+      getTargetBackend().addSymbolScope(VSApplicableSymbols[i], Results[i]);
+  }
 }
 
 std::string ObjectLinker::getLTOTempPrefix() const {
@@ -489,7 +592,7 @@ ObjectLinker::createLTOTempFile(size_t Number, bool Asm,
   if (Asm) {
     Suffix = "s";
     // Also use non-temporary location for output asm file with -emit-asm,
-    // independently from -save-temps.
+    // independently from --save-temps.
     Prefix = ThisModule->getLinker()->getLinkerDriver()->isRunLTOOnly()
                  ? getLTOTempPrefix()
                  : MLtoTempPrefix;
@@ -595,16 +698,6 @@ bool ObjectLinker::readRelocations() {
   std::vector<InputFile *> Inputs;
   getInputs(Inputs);
   for (auto *Ai : Inputs) {
-    if (Ai->getInput()->getAttribute().isPatchBase()) {
-      if (auto *ELFFile = llvm::dyn_cast<ELFFileBase>(Ai)) {
-        eld::Expected<bool> Exp =
-            getELFExecObjParser()->parsePatchBase(*ELFFile);
-        if (!Exp.has_value())
-          ThisConfig.raiseDiagEntry(std::move(Exp.error()));
-        if (!Exp.has_value() || !Exp.value())
-          return false;
-      }
-    }
     if (!Ai->isObjectFile())
       continue;
     // Dont read relocations from inputs that are specified
@@ -759,29 +852,6 @@ void ObjectLinker::assignOutputSections(std::vector<eld::InputFile *> &Inputs) {
   if (ThisModule->getPrinter()->allStats())
     ThisConfig.raise(Diag::linker_script_rule_matching_time)
         << (int)std::chrono::duration<double, std::milli>(End - Start).count();
-}
-
-// Sections in ELFFileFormat are not internal but are Output sections.
-// At the moment, there is  no way being marked with assignOutputSections
-// We traverse them explicitly to mark them as ignore before placing them.
-void ObjectLinker::markDiscardFileFormatSections() {
-  auto &SectionMap = ThisModule->getScript().sectionMap();
-  SectionMap::iterator It = SectionMap.findIter("/DISCARD/");
-  bool IsGnuCompatible =
-      (ThisConfig.options().getScriptOption() == GeneralOptions::MatchGNU);
-  for (auto &Sec : getTargetBackend().getOutputFormat()->getSections()) {
-    SectionMap::mapping Pair =
-        SectionMap.findIn(It, "internal", *Sec, false, "internal",
-                          Sec->sectionNameHash(), 0, 0, IsGnuCompatible);
-    if (Pair.first && Pair.first->isDiscard()) {
-      Sec->setKind(LDFileFormat::Ignore);
-      if (ThisConfig.options().isSectionTracingRequested() &&
-          ThisConfig.options().traceSection(Pair.first->name().str())) {
-        ThisConfig.raise(Diag::discarded_section_info)
-            << Pair.first->getSection()->getDecoratedName(ThisConfig.options());
-      }
-    }
-  }
 }
 
 bool ObjectLinker::mergeInputSections(ObjectBuilder &Builder,
@@ -998,8 +1068,6 @@ bool ObjectLinker::createOutputSection(ObjectBuilder &Builder,
       OutSect->setAddrAlign(OutAlign);
   }
 
-  /// FIXME: this vector is unused?
-  std::vector<RuleContainer *> InputsWithNoData;
   RuleContainer *FirstNonEmptyRule = nullptr;
 
   for (In = InBegin; In != InEnd; ++In) {
@@ -1514,8 +1582,7 @@ bool ObjectLinker::addUndefSymbols() {
           I, (*UndefSym)->name(), false, eld::ResolveInfo::NoType,
           eld::ResolveInfo::Undefined, eld::ResolveInfo::Global, 0, 0,
           eld::ResolveInfo::Default, nullptr, Result,
-          false /* isPostLTOPhase */, false, 0, false /* isPatchable */,
-          ThisModule->getPrinter());
+          false /* isPostLTOPhase */, false, 0, ThisModule->getPrinter());
       // create a output LDSymbol. All external symbols are entry symbols.
       OutputSym = make<LDSymbol>(Result.Info, false);
       Result.Info->setOutSymbol(OutputSym);
@@ -1533,7 +1600,7 @@ bool ObjectLinker::addUndefSymbols() {
         I, S->name(), false, eld::ResolveInfo::NoType,
         eld::ResolveInfo::Undefined, eld::ResolveInfo::Global, 0, 0,
         eld::ResolveInfo::Default, NULL, Result, false /* isPostLTOPhase */,
-        false, 0, false /* isPatchable */, ThisModule->getPrinter());
+        false, 0, ThisModule->getPrinter());
     // create a output LDSymbol. All external symbols are entry symbols.
     OutputSym = make<LDSymbol>(Result.Info, false);
     Result.Info->setOutSymbol(OutputSym);
@@ -1795,12 +1862,6 @@ bool ObjectLinker::addScriptSymbols() {
       Type = static_cast<ResolveInfo::Type>(OldInfo->type());
       Vis = OldInfo->visibility();
       Size = OldInfo->size();
-
-      if (OldInfo->outSymbol() && OldInfo->outSymbol()->hasFragRefSection()) {
-        if (OldInfo->isPatchable())
-          ThisConfig.raise(Diag::error_patchable_script)
-              << OldInfo->outSymbol()->name();
-      }
     }
     PluginManager &PM = ThisModule->getPluginManager();
     SymbolInfo SymInfo(ScriptInput, Size, ResolveInfo::Absolute, Type, Vis,
@@ -2230,6 +2291,8 @@ bool ObjectLinker::addDynamicSymbols() {
 #endif
 }
 
+void ObjectLinker::sizeDynamic() { getTargetBackend().sizeDynamic(); }
+
 /// prelayout - help backend to do some modification before layout
 bool ObjectLinker::prelayout() {
   getTargetBackend().preLayout();
@@ -2237,7 +2300,7 @@ bool ObjectLinker::prelayout() {
   if (!ThisConfig.getDiagEngine()->diagnose())
     return false;
 
-  getTargetBackend().sizeDynamic();
+  getTargetBackend().reserveDynamic();
 
   getTargetBackend().initSymTab();
 
@@ -2525,6 +2588,8 @@ bool ObjectLinker::emitOutput(llvm::FileOutputBuffer &POutput) {
 /// postProcessing - do modification after all processes
 eld::Expected<void>
 ObjectLinker::postProcessing(llvm::FileOutputBuffer &POutput) {
+  getTargetBackend().applyPluginFragmentReplacements(POutput);
+
   {
     eld::RegisterTimer T("Sync Relocations", "Emit Output File",
                          ThisConfig.options().printTimingStats());
@@ -3000,8 +3065,8 @@ bool ObjectLinker::finalizeLtoSymbolResolution(
   /// The definition of this symbol is visible outside of the LTO unit.
 
   /// LinkerRedefined = True
-  /// Linker redefined version of the symbol which appeared in -wrap or
-  /// -defsym linker option.
+  /// Linker redefined version of the symbol which appeared in --wrap or
+  /// --defsym linker option.
 
   bool HasSectionsCmd =
       ThisModule->getScript().linkerScriptHasSectionsCommand();
@@ -3593,10 +3658,7 @@ void ObjectLinker::addInputFileToTar(InputFile *Ipt, MappingFile::Kind K) {
   if (Ipt->getInput()->isArchiveMember())
     return;
   Input *I = Ipt->getInput();
-  bool UseDecorated =
-      !I->isNamespec() &&
-      Ipt->getKind() == InputFile::InputFileKind::ELFDynObjFileKind;
-  Ipt->setMappedPath(UseDecorated ? I->decoratedPath() : I->getName());
+  Ipt->setMappedPath(I->getName());
   Ipt->setMappingFileKind(K);
   OutputTar->addInputFile(Ipt, /*isLTO*/ false);
 }
@@ -3627,14 +3689,6 @@ bool ObjectLinker::readAndProcessInput(Input *Input, bool IsPostLto) {
     }
     return true;
   }
-  if (Input->getAttribute().isPatchBase() &&
-      CurInput->getKind() != InputFile::ELFExecutableFileKind) {
-    ThisConfig.raise(Diag::err_patch_base_not_executable)
-        << Input->getResolvedPath();
-    ThisModule->setFailure(true);
-    return false;
-  }
-
   if (CurInput->isBinaryFile()) {
     eld::RegisterTimer T("Read ELF Executable Files", "Read all Input files",
                          ThisConfig.options().printTimingStats());

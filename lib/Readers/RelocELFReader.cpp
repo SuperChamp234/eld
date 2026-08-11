@@ -209,6 +209,10 @@ eld::Expected<bool> RelocELFReader<ELFT>::readCompressedSection(ELFSection *S) {
   if (hdr->ch_type != llvm::ELF::ELFCOMPRESS_ZLIB)
     return false;
 
+  // Check if zlib is available before calling decompress.
+  if (!llvm::compression::zlib::isAvailable())
+    return false;
+
   size_t uncompressedSize = hdr->ch_size;
   typename ELFReader<ELFT>::uintX_t alignment =
       std::max<typename ELFReader<ELFT>::uintX_t>(hdr->ch_addralign, 1);
@@ -407,7 +411,7 @@ LDSymbol *RelocELFReader<ELFT>::createUndefReference(llvm::StringRef symName) {
       inputFile, symName.str(), false, eld::ResolveInfo::NoType,
       eld::ResolveInfo::Undefined, eld::ResolveInfo::Global, 0, 0,
       eld::ResolveInfo::Default, nullptr, result, false, false, 0,
-      false /* isPatchable */, this->m_Module.getPrinter());
+      this->m_Module.getPrinter());
 
   LDSymbol *sym = make<LDSymbol>(result.Info, false);
   result.Info->setOutSymbol(sym);

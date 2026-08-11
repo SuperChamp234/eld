@@ -66,7 +66,7 @@ public:
     ExcludeFile,           // EXCLUDE_FILE(...)
     ExternList,            // --extern-list
     DuplicateCodeList,     // --copy-farcalls-from-file
-    NoReuseTrampolineList, // -no-reuse-trampolines-file
+    NoReuseTrampolineList, // --no-reuse-trampolines-file
     Memory,                // MEMORY
     Unknown
   };
@@ -326,6 +326,8 @@ public:
   }
 
 private:
+  void setCommandContext(ScriptCommand *Cmd);
+
   Kind ScriptFileKind;
   Module &ThisModule;
   LinkerScriptFile &ThisLinkerScriptFile;

@@ -1,0 +1,18 @@
+...@common.d2
+
+direction: down
+
+"Initialize the plugin".class: phase
+"Process input files, and perform garbage\ncollection on sections".class: phase
+"UserPlugin::Init(...)".class: callback
+"call\nUserPlugin::ProcessSection(...)\nfor each input section that is\nnot garbage-collected".class: callback
+"UserPlugin::Run(...)".class: callback
+"UserPlugin::Destroy(...)".class: callback
+"Continue the linking\nProcess".class: phase
+
+"Initialize the plugin" -> "Process input files, and perform garbage\ncollection on sections": { class: flow }
+"Process input files, and perform garbage\ncollection on sections" -> "UserPlugin::Init(...)": { class: flow }
+"UserPlugin::Init(...)" -> "call\nUserPlugin::ProcessSection(...)\nfor each input section that is\nnot garbage-collected": { class: flow }
+"call\nUserPlugin::ProcessSection(...)\nfor each input section that is\nnot garbage-collected" -> "UserPlugin::Run(...)": { class: flow }
+"UserPlugin::Run(...)" -> "UserPlugin::Destroy(...)": { class: flow }
+"UserPlugin::Destroy(...)" -> "Continue the linking\nProcess": { class: flow }

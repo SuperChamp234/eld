@@ -183,6 +183,7 @@ bool GeneralOptions::shouldTraceMergeStrSection(const ELFSection *S) const {
         return true;
     return false;
   }
+  llvm_unreachable("Unknown MergeStrTraceType!");
 }
 
 eld::Expected<void> GeneralOptions::setTrace(const char *PTraceType) {
@@ -234,6 +235,7 @@ eld::Expected<void> GeneralOptions::setTrace(const char *PTraceType) {
             .Case("lto", DiagEngine->getPrinter()->TraceLTO)
             .Case("merge-strings", DiagEngine->getPrinter()->TraceMergeStrings)
             .Case("plugin", DiagEngine->getPrinter()->TracePlugin)
+            .Case("relax", DiagEngine->getPrinter()->TraceRelax)
             .Case("threads", DiagEngine->getPrinter()->TraceThreads)
             .Case("trampolines", DiagEngine->getPrinter()->TraceTrampolines)
             .Case("wrap-symbols", DiagEngine->getPrinter()->TraceWrap)
@@ -412,7 +414,7 @@ std::vector<llvm::StringRef> GeneralOptions::getLTOOptionsAsString() const {
     ReturnValue.push_back("asmopts");
   if ((LTOOptions & LTODisableLinkOrder) == LTODisableLinkOrder)
     ReturnValue.push_back("Disable link order with linker scripts/LTO");
-  // Extend this later or for other -flto-options
+  // Extend this later or for other --flto-options
   return ReturnValue;
 }
 
@@ -676,4 +678,17 @@ bool GeneralOptions::traceSymbol(const ResolveInfo &RI) const {
     }
   }
   return false;
+}
+
+std::optional<std::string>
+GeneralOptions::findRemapInput(llvm::StringRef FileName) const {
+  std::string NormalizedFileName = llvm::sys::path::convert_to_slash(FileName);
+  for (const auto &Entry : RemapInputs) {
+    std::string NormalizedPattern =
+        llvm::sys::path::convert_to_slash(Entry.Pattern);
+    WildcardPattern Pat(NormalizedPattern);
+    if (Pat.matched(NormalizedFileName))
+      return Entry.Replacement;
+  }
+  return std::nullopt;
 }

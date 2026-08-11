@@ -1,0 +1,86 @@
+# GitHub Automatic Release Notes Configuration
+# https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+#
+# PRs are categorized by their labels. Apply one of the labels below to a PR
+# and it will appear under the matching section in the release notes.
+# PRs with no matching label fall into "Other Changes".
+# PRs labelled "ignore-for-release" are excluded entirely.
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release-notes   # housekeeping, CI-only, or draft PRs
+    authors:
+      - dependabot
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking-change
+
+    - title: New Features
+      labels:
+        - enhancement
+
+    - title: Bug Fixes
+      labels:
+        - bug
+
+    - title: Performance Improvements
+      labels:
+        - performance
+
+    - title: Documentation
+      labels:
+        - documentation
+
+    - title: Linker Script
+      labels:
+        - linkerscript
+
+    - title: Command line
+      labels:
+        - command-line
+
+    - title: Memory Usage
+      labels:
+        - memory-usage
+
+    - title: Diagnostics
+      labels:
+        - diagnostics
+
+    - title: Map File
+      labels:
+        - map-file
+
+    - title: Plugin
+      labels:
+        - plugin
+
+    - title: Reproduce
+      labels:
+        - reproduce-functionality
+
+    - title: AArch64
+      labels:
+        - aarch64
+
+    - title: ARM
+      labels:
+        - arm
+
+    - title: Hexagon
+      labels:
+        - hexagon
+
+    - title: RISCV
+      labels:
+        - risc-v
+
+    - title: X86-64
+      labels:
+        - x86-64
+
+    - title: Other Changes
+      labels:
+        - "*"

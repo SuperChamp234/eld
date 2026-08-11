@@ -1,0 +1,14 @@
+...@common.d2
+
+direction: right
+
+"Finalize output\nimage layout".class: phase
+"UserPlugin::Init".class: callback
+"Call\nUserPlugin::ProcessOutputSection\nfor each output section".class: callback
+"Call\nUserPlugin::Destroy".class: callback
+"Finalize relocations,\nsymbol values and then\nemit output image.".class: phase
+
+"Finalize output\nimage layout" -> "UserPlugin::Init": { class: flow }
+"UserPlugin::Init" -> "Call\nUserPlugin::ProcessOutputSection\nfor each output section": { class: flow }
+"Call\nUserPlugin::ProcessOutputSection\nfor each output section" -> "Call\nUserPlugin::Destroy": { class: flow }
+"Call\nUserPlugin::Destroy" -> "Finalize relocations,\nsymbol values and then\nemit output image.": { class: flow }

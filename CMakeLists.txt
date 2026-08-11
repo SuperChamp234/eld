@@ -217,9 +217,9 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/include/eld/PluginAPI/)
 
-option(ELD_COVERAGE "Build ELD with coverage" OFF)
+option(ELD_COVERAGE "Build ELD with LLVM source-based coverage instrumentation" OFF)
 if(ELD_COVERAGE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-instr-generate -fcoverage-mapping")
 endif()
 
 option(ELD_SANITIZE "Build ELD with Sanitizer" OFF)
@@ -285,7 +285,7 @@ add_subdirectory(Plugins)
 option(ELD_INSTALL_LINKER_SCRIPT_TEMPLATES
        "Include linker script templates in the install" ON)
 option(ELD_ENABLE_PDF_DOCS
-       "Enable PDF documentation generation (requires rst2pdf)" OFF)
+       "Enable PDF documentation generation (requires Typst)" OFF)
 
 if(ELD_INSTALL_LINKER_SCRIPT_TEMPLATES)
   install(

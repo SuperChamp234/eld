@@ -37,6 +37,7 @@
 #include "eld/Support/StringUtils.h"
 #include "eld/Support/TargetRegistry.h"
 #include "eld/Support/TargetSelect.h"
+#include "eld/Support/Utils.h"
 #include "eld/Target/TargetMachine.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/LTO/LTO.h"
@@ -190,8 +191,13 @@ void GnuLdDriver::printAboutInfo() const {
 }
 
 void GnuLdDriver::printVersionInfo() const {
-  outs() << "eld " << eld::getELDVersion() << " (GNU Compatible linker)"
-         << "\n";
+  // The first line's first two words are deliberately "GNU"/"ld", ending in
+  // nothing but the bare version number. Build systems that identify the
+  // linker by parsing --version output (e.g. the Linux kernel's
+  // scripts/ld-version.sh) look for a first line whose first two words are
+  // exactly "GNU"/"ld" and take the last word on that line as the version;
+  // without this, such scripts reject eld as an "unknown linker".
+  outs() << "GNU ld compatible linker - eld " << eld::getELDVersion() << "\n";
   outs() << "Supported Targets: ";
   for (const auto &x : m_SupportedTargets)
     outs() << x << " ";
@@ -516,7 +522,7 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
                           arg->getValue());
   }
 
-  // -flto-use-as
+  // --flto-use-as
   if (Args.hasArg(T::flto_use_as)) {
     Config.options().setLTOUseAs();
     Config.addCommandLine(Table->getOptionName(T::flto_use_as), true);
@@ -528,7 +534,7 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
   // If -M option is used, lets try to use color.
   Config.options().setMapFileWithColor(Args.hasArg(T::PrintMap));
 
-  // -MapDetail
+  // --MapDetail
   for (llvm::opt::Arg *arg : Args.filtered(T::MapDetail)) {
     eld::Expected<void> E = eld::LayoutInfo::setLayoutDetail(
         arg->getValue(), Config.getDiagEngine());
@@ -562,7 +568,7 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
   if (!Config.options().rosegment())
     Config.options().setROSegment(Args.hasArg(T::rosegment));
 
-  // -emit-timing-stats-in-output
+  // --emit-timing-stats-in-output
   if (Args.hasArg(T::emit_timing_stats_in_output))
     Config.options().setInsertTimingStats(true);
 
@@ -585,6 +591,10 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
   // --[no-]warn-shared-textrel
   Config.options().setWarnSharedTextrel(Args.hasFlag(
       T::warn_shared_textrel, T::no_warn_shared_textrel, /*default=*/false));
+
+  // --[no-]warn-rwx-segments
+  Config.options().setWarnRWXSegments(Args.hasFlag(
+      T::warn_rwx_segments, T::no_warn_rwx_segments, /*default=*/true));
 
   // --warn-common
   if (Args.hasArg(T::warn_common))
@@ -720,11 +730,13 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
   for (auto *arg : Args.filtered(T::wrap)) {
     std::string wname = arg->getValue();
     wrapString.push_back(wname);
+    // FIXME: No need for string saver here!
     std::string to_wrap_str = eld::Saver.save("__wrap_" + wname).str();
     Config.options().renameMap().insert(std::make_pair(wname, to_wrap_str));
 
     // add __real_wname -> wname
     std::string from_real_str = eld::Saver.save("__real_" + wname).str();
+    // Undefined behavior!
     Config.options().renameMap().insert(std::make_pair(from_real_str, wname));
   } // end of for
   if (Args.hasArg(T::wrap))
@@ -986,6 +998,8 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
     Config.options().setOutputFileName(outputFileName);
     Config.addCommandLine(Table->getOptionName(T::output_file),
                           outputFileName.c_str());
+    Config.options().setEmitOutputFile(
+        !eld::utility::isNullDevice(outputFileName));
   }
 
   std::string conflictingOption;
@@ -1164,7 +1178,7 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
   // --reproduce-compressed
   if (llvm::opt::Arg *arg = Args.getLastArg(T::reproduce_compressed)) {
     Config.options().setRecordInputfiles();
-    Config.options().setCompressTar();
+    Config.options().setCompressReproduceTar();
     reproduceFileName = arg->getValue();
   }
 
@@ -1319,6 +1333,9 @@ bool GnuLdDriver::processOptions(llvm::opt::InputArgList &Args) {
     Config.options().setArchiveMemberReportFile(A->getValue());
   }
 
+  if (Args.hasArg(T::use_old_rule_matching))
+    Config.options().setUseOldRuleMatching(true);
+
   Config.options().setUnknownOptions(Args.getAllArgValues(T::UNKNOWN));
   return true;
 }
@@ -1330,6 +1347,7 @@ bool GnuLdDriver::createInputActions(llvm::opt::InputArgList &Args,
   size_t input_num = 0;
   int GroupMatchCount = 0;
   int LibMatchCount = 0;
+  bool HasVersionAction = false;
 
   for (llvm::opt::Arg *arg : Args) {
     switch (arg->getOption().getID()) {
@@ -1494,6 +1512,14 @@ bool GnuLdDriver::createInputActions(llvm::opt::InputArgList &Args,
       ++input_num;
     } break;
 
+    // -v prints the version banner and lets linking continue. Unlike
+    // --version, -v only short-circuits when there are no real inputs.
+    case T::v: {
+      actions.push_back(eld::make<eld::VersionAction>(m_SupportedTargets,
+                                                      Config.getPrinter()));
+      HasVersionAction = true;
+    } break;
+
     default:
       break;
     }
@@ -1511,7 +1537,7 @@ bool GnuLdDriver::createInputActions(llvm::opt::InputArgList &Args,
     return false;
   }
 
-  if (input_num == 0) {
+  if (input_num == 0 && !HasVersionAction) {
     Config.raise(Diag::err_no_inputs);
     Config.raise(Diag::linking_had_errors) << getOutputFileName();
     return false;
@@ -1730,7 +1756,7 @@ bool GnuLdDriver::processReproduceOption(
     }
   }
   if (!outputTar->getLTOObjects().empty()) {
-    os << "-flto-options=lto-output-file=";
+    os << "--flto-options=lto-output-file=";
     auto &LTOObjects = outputTar->getLTOObjects();
     for (size_t i = 0; i < LTOObjects.size() - 1; ++i)
       os << outputTar->rewritePath(LTOObjects[i]) << ",";
@@ -1942,6 +1968,12 @@ eld::Module *GnuLdDriver::ThisModule = nullptr;
 template <class T>
 bool GnuLdDriver::doLink(llvm::opt::InputArgList &Args,
                          std::vector<eld::InputAction *> &actions) {
+  // Bare -v (no real inputs): print the banner and exit immediately.
+  if (Args.hasArg(T::v) && !Args.hasArg(T::INPUT)) {
+    printVersionInfo();
+    return true;
+  }
+
   const eld::Target *ELDTarget = nullptr;
   if (!isDriverFlavorUnknown()) {
     // Get the target specific parser.
@@ -2123,9 +2155,12 @@ std::optional<int> GnuLdDriver::parseOptions(ArrayRef<const char *> Args,
                      /*ShowAllAliases=*/true);
     return LINK_SUCCESS;
   }
-  if (ArgList.hasArg(OPT_GnuLdOptTable::version)) {
-    printVersionInfo();
-    return LINK_SUCCESS;
+  if (llvm::opt::Arg *Arg = ArgList.getLastArg(OPT_GnuLdOptTable::v,
+                                               OPT_GnuLdOptTable::version)) {
+    if (Arg->getOption().matches(OPT_GnuLdOptTable::version)) {
+      printVersionInfo();
+      return LINK_SUCCESS;
+    }
   }
   // --about
   if (ArgList.hasArg(OPT_GnuLdOptTable::about)) {
@@ -2150,7 +2185,7 @@ bool GnuLdDriver::processLTOOptions(llvm::lto::Config &Conf,
 
 std::string GnuLdDriver::getOutputFileName() const {
   std::string FileName = Config.options().outputFileName();
-  if (FileName != "/dev/null")
+  if (FileName != "/dev/null" && FileName != "NUL")
     FileName = eld::sys::fs::Path(FileName).filename().native();
 
   return FileName;

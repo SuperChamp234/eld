@@ -107,8 +107,7 @@ bool NamePool::insertSymbol(
     ResolveInfo::Binding Binding, ResolveInfo::SizeType Size,
     LDSymbol::ValueType Value, ResolveInfo::Visibility Visibility,
     ResolveInfo *pOldInfo, Resolver::Result &PResult, bool IsPostLtoPhase,
-    bool IsBitCode, unsigned int PSymIdx, bool IsPatchable,
-    DiagnosticPrinter *Printer) {
+    bool IsBitCode, unsigned int PSymIdx, DiagnosticPrinter *Printer) {
   bool Exist = false;
   ResolveInfo *NewSymbol = nullptr;
   ResolveInfo *old_symbol = nullptr;
@@ -136,8 +135,6 @@ bool NamePool::insertSymbol(
     NewSymbol->setResolvedOrigin(Input);
   if (IsBitCode)
     NewSymbol->setInBitCode(IsBitCode);
-  if (IsPatchable)
-    NewSymbol->setPatchable();
 
   SymbolInfo SymInfo(Input, Size, Binding, Type, Visibility, Desc, IsBitCode);
   // We do not create input symbols for non object file symbols!
@@ -228,7 +225,7 @@ bool NamePool::getSymbolTracingRequested() const {
   return IsSymbolTracingRequested;
 }
 /// findInfo - find the resolved ResolveInfo
-ResolveInfo *NamePool::findInfo(std::string SymbolName) {
+ResolveInfo *NamePool::findInfo(const std::string &SymbolName) {
   auto I = GlobalSymbols.find(SymbolName);
   if (I == GlobalSymbols.end())
     return nullptr;
@@ -236,8 +233,7 @@ ResolveInfo *NamePool::findInfo(std::string SymbolName) {
 }
 
 /// findInfo - find the resolved ResolveInfo
-// FIXME: Pass name by const reference, or use llvm::StringRef
-const ResolveInfo *NamePool::findInfo(std::string SymbolName) const {
+const ResolveInfo *NamePool::findInfo(const std::string &SymbolName) const {
   auto I = GlobalSymbols.find(SymbolName);
   if (I == GlobalSymbols.end())
     return nullptr;
@@ -245,8 +241,7 @@ const ResolveInfo *NamePool::findInfo(std::string SymbolName) const {
 }
 
 /// findSymbol - find the resolved output LDSymbol
-// FIXME: Pass name by const reference, or use llvm::StringRef
-LDSymbol *NamePool::findSymbol(std::string SymbolName) {
+LDSymbol *NamePool::findSymbol(const std::string &SymbolName) {
   ResolveInfo *Info = findInfo(SymbolName);
   if (nullptr == Info)
     return nullptr;
@@ -254,8 +249,7 @@ LDSymbol *NamePool::findSymbol(std::string SymbolName) {
 }
 
 /// findSymbol - find the resolved output LDSymbol
-// FIXME: Pass name by const reference, or use llvm::StringRef
-const LDSymbol *NamePool::findSymbol(std::string SymbolName) const {
+const LDSymbol *NamePool::findSymbol(const std::string &SymbolName) const {
   const ResolveInfo *Info = findInfo(SymbolName);
   if (nullptr == Info)
     return nullptr;
@@ -353,8 +347,7 @@ ResolveInfo NamePool::createInputSymbolRI(
     const std::string &SymName, InputFile &IF, bool IsDyn,
     ResolveInfo::Type SymType, ResolveInfo::Desc SymDesc,
     ResolveInfo::Binding SymBinding, ResolveInfo::SizeType SymSize,
-    ResolveInfo::Visibility SymVisibility, LDSymbol::ValueType SymValue,
-    bool IsPatchable) const {
+    ResolveInfo::Visibility SymVisibility, LDSymbol::ValueType SymValue) const {
   llvm::StringRef SymNameRef = Saver.save(SymName);
   ResolveInfo RI(SymNameRef);
   RI.setIsSymbol(true);
@@ -367,8 +360,6 @@ ResolveInfo NamePool::createInputSymbolRI(
   RI.setResolvedOrigin(&IF);
   RI.setValue(SymValue, /*isFinal=*/false);
   RI.setInBitCode(IF.isBitcode());
-  if (IsPatchable)
-    RI.setPatchable();
   if (IsDyn && RI.canBePreemptible())
     RI.setExportToDyn();
   return RI;
@@ -474,7 +465,7 @@ void NamePool::addUndefinedELFSymbol(InputFile *I, std::string SymbolName,
   insertSymbol(I, SymbolName, false, ResolveInfo::NoType,
                ResolveInfo::Undefined, ResolveInfo::Global, 0, 0, Vis, nullptr,
                Result, false /* postLTOPhase*/, false, 0,
-               false /* isPatchable */, ThisConfig.getPrinter());
+               ThisConfig.getPrinter());
   // create a output LDSymbol
   LDSymbol *OutputSym =
       make<LDSymbol>(Result.Info, ThisConfig.options().gcSections());

@@ -658,7 +658,6 @@ eld::ScriptCommand *plugin::Script::Output::getCommand() const {
   return m_Output;
 }
 
-
 //
 // OUTPUT_ARCH
 //

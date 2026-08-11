@@ -9,6 +9,7 @@
 #include "RISCVHelper.h"
 #include "RISCVLLVMExtern.h"
 #include "RISCVRelocationInternal.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -63,6 +64,7 @@ bool checkRange(uint64_t Value, bool IsSigned, EncodingType Type) {
   case EncTy_LEB128:
     return true;
   }
+  llvm_unreachable("Unexpected EncodingType!");
 }
 
 uint64_t clearImmediateBits(uint64_t Instr, EncodingType Type) {
@@ -102,13 +104,14 @@ uint64_t clearImmediateBits(uint64_t Instr, EncodingType Type) {
     return Instr & 0x00000000C00FFFFFull;
   case EncTy_QC_ES:
     return Instr & 0x00000000C1FFF07Full;
-  /* C.LUI/C.LI clearing handled in doRelocHelper */
   case EncTy_CI:
+    return Instr & 0xEF83;
   /* No overwriting being performed */
   case EncTy_None:
   case EncTy_LEB128:
     return Instr;
   }
+  llvm_unreachable("Unexpected EncodingType!");
 }
 
 // The Relocation helper function that computes the Instruction bits with the
@@ -143,13 +146,10 @@ uint64_t doRelocHelper(const RelocationInfo &RelocInfo, uint64_t Instruction,
     Value = encodeCJ(Value);
     break;
   case EncTy_CI: {
-    if (Value >> 12 == 0) {
-      // `c.lui rd, 0` is illegal, convert to `c.li rd, 0`
-      return (Instruction & 0x0F83) | 0x4000;
-    } else {
-      Instruction &= 0xEF83;
-      Value = encodeCI(Value);
-    }
+    // `c.lui rd, 0` is illegal, convert to `c.li rd, 0`
+    if ((Instruction & 0xE003) == 0x6001 && Value >> 12 == 0)
+      Instruction ^= 0x2000;
+    Value = encodeCI(Value, RelocInfo.Shift);
     break;
   }
   case EncTy_QC_EB:

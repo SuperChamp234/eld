@@ -6,13 +6,9 @@ SECTIONS
 {
   /* Code starts. */
 
+  /* Address 0x2000000 is supplied by --section-start=.start=0x2000000 in h2-picolibc.cfg */
   .start          :
   {
-    /*
-      H2 expects the entry point to be 0x2000000
-      so it places the .start section at 0x2000000,
-      so place _start which is in .text.init.enter in .start
-    */
     KEEP (*(.text.init.enter))
     KEEP (*(.start))
   } =0x00c0007f
@@ -36,24 +32,28 @@ SECTIONS
   /* Need to pre-align so that the symbols come after padding */
   . = ALIGN(8);
   /* __bothinit_array_start/end pointers are used by Picolibc to
-   * call constructor functions, don't add unwanted sections in between
+   * call constructor functions, don't add unwanted sections in between.
+   *
+   * All constructor input sections (.preinit_array, .ctors, .init_array) are
+   * collected into a SINGLE output section so the linker cannot place an
+   * orphan section between them.  An orphan landing inside the
+   * [__bothinit_array_start, __bothinit_array_end) window would be walked by
+   * __libc_init_array() and called as a bogus constructor function pointer,
+   * faulting at startup.  Consolidating guarantees the window contains only
+   * genuine constructor pointers.
    */
   PROVIDE_HIDDEN ( __bothinit_array_start = . );
-  .preinit_array  :
+  .init_array     :
   {
     PROVIDE_HIDDEN ( __preinit_array_start = . );
     KEEP (*(.preinit_array))
     PROVIDE_HIDDEN ( __preinit_array_end = . );
-  }
-  .ctors          :
-  {
+
     PROVIDE_HIDDEN ( __ctors_start = . );
     KEEP (*( SORT_BY_INIT_PRIORITY(.ctors.*)))
     KEEP (*(.ctors))
     PROVIDE_HIDDEN ( __ctors_end = . );
-  }
-  .init_array     :
-  {
+
     PROVIDE_HIDDEN ( __init_array_start = . );
     KEEP (*( SORT_BY_INIT_PRIORITY(.init_array.*)))
     KEEP (*(.init_array))
@@ -61,15 +61,16 @@ SECTIONS
   }
   PROVIDE_HIDDEN ( __bothinit_array_end = . );
 
-  .dtors          :
+  /* All destructor input sections (.dtors, .fini_array) are likewise
+   * collected into a SINGLE output section so no orphan section can be
+   * placed between the entries that the runtime walks at exit. */
+  .fini_array     :
   {
     PROVIDE_HIDDEN ( __dtors_start = . );
     KEEP (*(SORT_BY_INIT_PRIORITY(.dtors.*)))
     KEEP (*(.dtors))
     PROVIDE_HIDDEN ( __dtors_end = . );
-  }
-  .fini_array     :
-  {
+
     PROVIDE_HIDDEN ( __fini_array_start = . );
     KEEP (*(SORT_BY_INIT_PRIORITY(.fini_array.*)))
     KEEP (*(.fini_array))
@@ -163,45 +164,42 @@ SECTIONS
   {
     PROVIDE (_SDA_BASE_ = .);
     *(.sdata.1 .sdata.1.* .gnu.linkonce.s.1.*)
-    *(.sbss.1 .sbss.1.* .gnu.linkonce.sb.1.*)
-    *(.scommon.1 .scommon.1.*)
     *(.sdata.2 .sdata.2.* .gnu.linkonce.s.2.*)
-    *(.sbss.2 .sbss.2.* .gnu.linkonce.sb.2.*)
-    *(.scommon.2 .scommon.2.*)
     *(.sdata.4 .sdata.4.* .gnu.linkonce.s.4.*)
-    *(.sbss.4 .sbss.4.* .gnu.linkonce.sb.4.*)
-    *(.scommon.4 .scommon.4.*)
     *(.lit[a4] .lit[a4].* .gnu.linkonce.l[a4].*)
     *(.sdata.8 .sdata.8.* .gnu.linkonce.s.8.*)
-    *(.sbss.8 .sbss.8.* .gnu.linkonce.sb.8.*)
-    *(.scommon.8 .scommon.8.*)
     *(.lit8 .lit8.* .gnu.linkonce.l8.*)
     *(.sdata.hot .sdata.hot.* .gnu.linkonce.s.hot.*)
     *(.sdata .sdata.* .gnu.linkonce.s.*)
   }
-  .sbss           :
+  . = ALIGN (64);
+  .bss :
   {
     PROVIDE (__sbss_start = .);
     PROVIDE (___sbss_start = .);
     *(.dynsbss)
+    *(.sbss.1 .sbss.1.* .gnu.linkonce.sb.1.*)
+    *(.scommon.1 .scommon.1.*)
+    *(.sbss.2 .sbss.2.* .gnu.linkonce.sb.2.*)
+    *(.scommon.2 .scommon.2.*)
+    *(.sbss.4 .sbss.4.* .gnu.linkonce.sb.4.*)
+    *(.scommon.4 .scommon.4.*)
+    *(.sbss.8 .sbss.8.* .gnu.linkonce.sb.8.*)
+    *(.scommon.8 .scommon.8.*)
     *(.sbss.hot .sbss.hot.* .gnu.linkonce.sb.hot.*)
     *(.sbss .sbss.* .gnu.linkonce.sb.*)
     *(.scommon .scommon.*)
-    . = ALIGN (. != 0 ? 64 : 1);
     PROVIDE (__sbss_end = .);
     PROVIDE (___sbss_end = .);
-  }
-  . = ALIGN (64);
-  .bss            :
-  {
-    __bss_start = .;
+
     *(.dynbss)
     *(.bss.hot .bss.hot.* .gnu.linkonce.b.hot.*)
     *(.bss .bss.* .gnu.linkonce.b.*)
     *(COMMON)
-    __bss_end = .;
   }
-  __bss_size = __bss_end - __bss_start;
+  __bss_start = ADDR(.bss);
+  __bss_end = ADDR(.bss) + SIZEOF(.bss);
+  __bss_size = SIZEOF(.bss);
 
   . = ALIGN (64);
   _end = .;
@@ -209,15 +207,17 @@ SECTIONS
 
   /* Picolibc looks for __heap* and __stack* symbols */
 
-  /* Allow a minimum heap size to be specified */
+  /*
+   * Heap is represented as a pair of address pointers only.
+   * No .heap section is created so the heap address space is not part of the
+   * ELF image and does not need to be zeroed at load time.
+   */
   __heap_start = .;
-  .heap (NOLOAD) :
-  {
-    . += (DEFINED(__heap_size_min) ? __heap_size_min : 0x10000);
-  }
-
-  __heap_end = .;
+  __heap_end = __heap_start + (DEFINED(__heap_size_min) ? __heap_size_min : 0x4000000);
   HEAP_SIZE = __heap_end - __heap_start;
+
+  /* Advance . past the heap so the stack region does not overlap heap memory */
+  . = __heap_end;
 
   __stack_size = 0x1000;
   STACK_SIZE = __stack_size;

@@ -2,6 +2,9 @@ llvm_add_library(
   ELDFragment
   STATIC
   BuildIDFragment.cpp
+  DynamicFragment.cpp
+  DynStrFragment.cpp
+  DynSymFragment.cpp
   EhFrameFragment.cpp
   EhFrameHdrFragment.cpp
   FillFragment.cpp

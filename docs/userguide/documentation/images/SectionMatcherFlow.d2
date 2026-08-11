@@ -1,0 +1,18 @@
+...@common.d2
+
+direction: down
+
+"Perform Section\nrule-matching".class: state
+"UserPlugin::Init(...)".class: callback
+"Call\nUserPlugin::ProcessSection(...)\nfor each input section".class: callback
+"UserPlugin::run(...)".class: callback
+"UserPlugin::Destroy(...)".class: callback
+"Perform garbage\ncollection".class: phase
+"Continue the linking\nProcess".class: phase
+
+"Perform Section\nrule-matching" -> "UserPlugin::Init(...)": { class: flow }
+"UserPlugin::Init(...)" -> "Call\nUserPlugin::ProcessSection(...)\nfor each input section": { class: flow }
+"Call\nUserPlugin::ProcessSection(...)\nfor each input section" -> "UserPlugin::run(...)": { class: flow }
+"UserPlugin::run(...)" -> "UserPlugin::Destroy(...)": { class: flow }
+"UserPlugin::Destroy(...)" -> "Perform garbage\ncollection": { class: flow }
+"Perform garbage\ncollection" -> "Continue the linking\nProcess": { class: flow }

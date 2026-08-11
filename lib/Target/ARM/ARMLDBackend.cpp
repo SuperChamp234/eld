@@ -13,7 +13,7 @@
 #include "ARMLDBackend.h"
 #include "ARM.h"
 #include "ARMAttributeFragment.h"
-#include "ARMELFDynamic.h"
+#include "ARMEXIDXFragment.h"
 #include "ARMInfo.h"
 #include "ARMRelocator.h"
 #include "ARMToARMStub.h"
@@ -35,12 +35,12 @@
 #include "eld/Support/RegisterTimer.h"
 #include "eld/Support/TargetRegistry.h"
 #include "eld/SymbolResolver/IRBuilder.h"
-#include "eld/Target/ARMEXIDXSection.h"
-#include "eld/Target/ELFFileFormat.h"
+#include "eld/Target/ELFDynamic.h"
 #include "eld/Target/ELFSegment.h"
 #include "eld/Target/ELFSegmentFactory.h"
 #include "eld/Target/GNULDBackend.h"
 #include "eld/Target/TargetInfo.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Object/ELFTypes.h"
@@ -48,7 +48,9 @@
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Program.h"
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 using namespace eld;
 using namespace llvm;
@@ -57,11 +59,10 @@ using namespace llvm;
 // ARMGNULDBackend
 //===----------------------------------------------------------------------===//
 ARMGNULDBackend::ARMGNULDBackend(eld::Module &pModule, TargetInfo *pInfo)
-    : GNULDBackend(pModule, pInfo), m_pRelocator(nullptr), m_pDynamic(nullptr),
-      m_pEXIDXStart(nullptr), m_pEXIDXEnd(nullptr), m_pIRelativeStart(nullptr),
-      m_pIRelativeEnd(nullptr), m_pEXIDX(nullptr), m_pRWPIBase(nullptr),
-      m_pSBRELSegment(nullptr), m_pARMAttributeSection(nullptr),
-      AttributeFragment(nullptr) {}
+    : GNULDBackend(pModule, pInfo), m_pRelocator(nullptr),
+      m_pEXIDXStart(nullptr), m_pEXIDXEnd(nullptr), m_pEXIDX(nullptr),
+      m_pRWPIBase(nullptr), m_pSBRELSegment(nullptr),
+      m_pARMAttributeSection(nullptr), AttributeFragment(nullptr) {}
 
 ARMGNULDBackend::~ARMGNULDBackend() {}
 
@@ -116,6 +117,23 @@ void ARMGNULDBackend::initTargetSections(ObjectBuilder &pBuilder) {
       Module::InternalInputType::Exception, LDFileFormat::Internal,
       ".ARM.exidx", llvm::ELF::SHT_ARM_EXIDX,
       llvm::ELF::SHF_ALLOC | llvm::ELF::SHF_LINK_ORDER, 4);
+
+  // For final links (executables and shared libraries), create a separate
+  // internal sentinel section that holds the 8-byte CANTUNWIND terminator.
+  // Its section type and name match *(.ARM.exidx*) linker script rules so it
+  // is always placed last.  Partial links (-r) do not get a sentinel.
+  if (LinkerConfig::Object != config().codeGenType()) {
+    m_pEXIDXSentinel = m_Module.createInternalSection(
+        Module::InternalInputType::Exception, LDFileFormat::Internal,
+        ".ARM.exidx", llvm::ELF::SHT_ARM_EXIDX,
+        llvm::ELF::SHF_ALLOC | llvm::ELF::SHF_LINK_ORDER, 4);
+    m_pSentinelFrag = make<EXIDXSentinelFragment>(m_pEXIDXSentinel);
+    m_pEXIDXSentinel->addFragment(m_pSentinelFrag);
+    LayoutInfo *LI = getModule().getLayoutInfo();
+    if (LI)
+      LI->recordFragment(m_pEXIDXSentinel->getInputFile(), m_pEXIDXSentinel,
+                         m_pSentinelFrag);
+  }
 }
 
 void ARMGNULDBackend::initTargetSymbols() {
@@ -150,7 +168,7 @@ void ARMGNULDBackend::initTargetSymbols() {
         m_Module.getIRBuilder()
             ->addSymbol<IRBuilder::Force, IRBuilder::Unresolve>(
                 m_Module.getInternalInput(Module::Script), SymbolName,
-                ResolveInfo::NoType, ResolveInfo::Define, ResolveInfo::Global,
+                ResolveInfo::Object, ResolveInfo::Define, ResolveInfo::Global,
                 0x0, // size
                 0x0, // value
                 FragmentRef::null(), ResolveInfo::Visibility::Hidden);
@@ -168,7 +186,7 @@ void ARMGNULDBackend::initTargetSymbols() {
         m_Module.getIRBuilder()
             ->addSymbol<IRBuilder::Force, IRBuilder::Unresolve>(
                 m_Module.getInternalInput(Module::Script), SymbolName,
-                ResolveInfo::NoType, ResolveInfo::Define, ResolveInfo::Global,
+                ResolveInfo::Object, ResolveInfo::Define, ResolveInfo::Global,
                 0x0, // size
                 0x0, // value
                 FragmentRef::null(), ResolveInfo::Visibility::Hidden);
@@ -217,59 +235,6 @@ void ARMGNULDBackend::doPreLayout() {
     return;
   }
 
-  ELFSection *exidx =
-      m_Module.getScript().sectionMap().find(llvm::ELF::SHT_ARM_EXIDX);
-  if (exidx && exidx->size()) {
-    OutputSectionEntry *O = exidx->getOutputSection();
-    Fragment *Start = nullptr;
-    Fragment *End = nullptr;
-    ELFSection *Last = nullptr;
-    for (auto &In : *O) {
-      ELFSection *S = In->getSection();
-      if (S->size() == 0)
-        continue;
-      Last = S;
-      if (!Start) {
-        Start = Last->getFrontFragment();
-      }
-      if (Last)
-        End = Last->getBackFragment();
-
-      FragmentRef *exidx_start = make<FragmentRef>(*Start, 0);
-
-      FragmentRef *exidx_end = make<FragmentRef>(*End, End->size());
-
-      ResolveInfo oldStart, oldEnd;
-
-      // FIXME: need real provide support. This will fail if trampoline inserted
-      // inside the EXIDX section
-      if (m_pEXIDXStart) {
-        m_pEXIDXStart->setValue(exidx->addr() +
-                                exidx_start->getOutputOffset(m_Module));
-        oldStart.override(*m_pEXIDXStart->resolveInfo());
-      }
-      if (m_pEXIDXEnd) {
-        m_pEXIDXEnd->setValue(exidx->addr() +
-                              exidx_end->getOutputOffset(m_Module));
-        oldEnd.override(*m_pEXIDXEnd->resolveInfo());
-      }
-
-      if (m_pEXIDXEnd) {
-        m_pEXIDXEnd->setFragmentRef(exidx_end);
-        m_pEXIDXEnd->resolveInfo()->setType(ResolveInfo::Object);
-      }
-      if (m_pEXIDXStart) {
-        m_pEXIDXStart->setFragmentRef(exidx_start);
-        m_pEXIDXStart->resolveInfo()->setType(ResolveInfo::Object);
-      }
-    }
-  }
-
-  // initialize .dynamic data
-  if ((!config().isCodeStatic() || config().options().forceDynamic()) &&
-      nullptr == m_pDynamic)
-    m_pDynamic = make<ARMELFDynamic>(*this, config());
-
   // set .got size
   // when building shared object, the .got section is must
   if (LinkerConfig::Object != config().codeGenType()) {
@@ -281,224 +246,285 @@ void ARMGNULDBackend::doPreLayout() {
     m_Module.addOutputSection(getRelaDyn());
   }
 
-  // We need link ARM.EXIDX.xx to .xx
-  Module::obj_iterator input, inEnd = m_Module.objEnd();
-  for (input = m_Module.objBegin(); input != inEnd; ++input) {
-    ELFObjectFile *ObjFile = llvm::dyn_cast<ELFObjectFile>(*input);
-    if (!ObjFile)
+  // For each EXIDX input section, ensure its output section's sh_link points
+  // to the output .text section (not the raw input section).  This is needed
+  // because ObjectBuilder stores the input-section link on the output section;
+  // getSectLink must return an output section index.
+  for (const auto &KV : m_EXIDXFragments) {
+    EXIDXFragment *Frag = KV.second;
+    ELFSection *InputExidx = Frag->getOwningSection();
+    if (!InputExidx)
       continue;
-    for (auto &sect : ObjFile->getSections()) {
-      if (sect->isBitcode())
-        continue;
-      ELFSection *section = llvm::dyn_cast<eld::ELFSection>(sect);
-      if (section->isIgnore())
-        continue;
-      if (section->isDiscard())
-        continue;
-      if (!section->isEXIDX())
-        continue;
-      // get the output relocation ELFSection with name in accordance with
-      // linker script rule for the section where relocations are patched
-      llvm::StringRef outputName = section->name();
-
-      ELFSection *output_sect = nullptr;
-      OutputSectionEntry *outputSection = section->getOutputSection();
-      if (outputSection)
-        output_sect = outputSection->getSection();
-      else
-        output_sect = m_Module.getSection(outputName.str());
-      if (nullptr == output_sect)
-        continue;
-
-      // set output relocation section link
-      const ELFSection *input_link =
-          llvm::dyn_cast_or_null<ELFSection>(section->getLink());
-      assert(nullptr != input_link && "Illegal input ARM.exidx section.");
-
-      // get the linked output section
-      ELFSection *output_link = nullptr;
-      outputSection = input_link->getOutputSection();
-      if (outputSection)
-        output_link = outputSection->getSection();
-      else
-        output_link = m_Module.getSection(input_link->name().str());
-
-      assert(nullptr != output_link);
-
-      output_sect->setLink(output_link);
-    }
+    ELFSection *OutExidx = InputExidx->getOutputELFSection();
+    if (!OutExidx || OutExidx->isIgnore() || OutExidx->isDiscard())
+      continue;
+    ELFSection *InputLink = InputExidx->getLink();
+    if (!InputLink)
+      continue;
+    ELFSection *OutLink = InputLink->getOutputELFSection();
+    if (OutLink)
+      OutExidx->setLink(OutLink);
   }
 
-  // check if entry is missing
-  LDSymbol *entry_sym = m_Module.getNamePool().findSymbol(getEntry().str());
-  Relocation *entry_reloc = nullptr;
-  ELFSection *Last = nullptr;
-  if (exidx && (entry_sym != nullptr) && (entry_sym->hasFragRef())) {
-    for (auto &In : *exidx->getOutputSection()) {
-      ELFSection *S = In->getSection();
-      if (S->size())
-        Last = S;
-      for (auto &F : S->getFragmentList()) {
-        for (auto &relocation : F->getOwningSection()->getRelocations()) {
-          // bypass the reloc if the symbol is in the discarded input section
-          ResolveInfo *info = relocation->symInfo();
-
-          if (ResolveInfo::Section == info->type() &&
-              ResolveInfo::Undefined == info->desc())
-            continue;
-
-          // bypass the reloc if the section where it sits will be discarded.
-          if (relocation->targetRef()->frag()->getOwningSection()->isIgnore())
-            continue;
-
-          if (relocation->targetRef()->frag()->getOwningSection()->isDiscard())
-            continue;
-
-          uint64_t reloc_offset = relocation->targetRef()->offset();
-          if (!reloc_offset) {
-            Fragment *region_frag =
-                relocation->symInfo()->outSymbol()->fragRef()->frag();
-            if (region_frag == entry_sym->fragRef()->frag()) {
-              entry_reloc = relocation;
-              break;
-            }
-          }
-        }
+  // Activate the sentinel fragment early so its 8-byte contribution to the
+  // .ARM.exidx output section size is known during the address-assignment
+  // layout pass.  Without this, the sentinel size would be 0 at layout time
+  // and .dynamic (or whatever follows) would be placed at an address that
+  // overlaps with the sentinel once it is activated in doPostLayout.
+  //
+  // Match GNU ld: only emit the sentinel when at least one live EXIDX entry
+  // carries real unwind data (i.e. not a bare CANTUNWIND word 0x1).
+  if (m_pSentinelFrag) {
+    for (const auto &KV : m_EXIDXFragments) {
+      EXIDXFragment *Frag = KV.second;
+      ELFSection *OutSec = Frag->getOutputELFSection();
+      if (OutSec && !OutSec->isIgnore() && !OutSec->isDiscard() &&
+          Frag->hasRealUnwindData()) {
+        m_pSentinelFrag->activate();
+        break;
       }
-    }
-
-    LayoutInfo *layoutInfo = getModule().getLayoutInfo();
-    if (!entry_reloc) {
-      static const char raw_data[] = "\x00\x00\x00\x00\x01\x00\x00\x00";
-      StringRef entry_data(raw_data, 8);
-      size_t align = entry_sym->fragRef()->frag()->alignment();
-      Fragment *frag =
-          make<RegionFragment>(entry_data, Last, Fragment::Type::Region, align);
-      Last->addFragmentAndUpdateSize(frag);
-      if (layoutInfo)
-        layoutInfo->recordFragment(Last->getInputFile(), Last, frag);
-      // create the relocation against this entry
-      entry_reloc = Relocation::Create(llvm::ELF::R_ARM_PREL31, 32,
-                                       make<FragmentRef>(*frag, 0), 0);
-      entry_reloc->setSymInfo(entry_sym->resolveInfo());
-      Last->addRelocation(entry_reloc);
-      m_InternalRelocs.push_back(entry_reloc);
     }
   }
 }
 
 void ARMGNULDBackend::sortEXIDX() {
-  // Mark all fragments.
+  // ARM EHABI requires .ARM.exidx entries to be sorted by the address of
+  // the function each entry describes.
   ELFSection *E =
       m_Module.getScript().sectionMap().find(llvm::ELF::SHT_ARM_EXIDX);
 
   if (!E)
     return;
 
-  if (!E->size())
+  OutputSectionEntry *O = E->getOutputSection();
+  if (!O)
     return;
 
-  OutputSectionEntry *O = E->getOutputSection();
-  llvm::SmallVector<Fragment *, 0> Frags;
-  ELFSection *exidx = nullptr;
-  // Scan relocation to the fragment.
+  const uint64_t MaxSortKey = std::numeric_limits<uint64_t>::max();
+
+  // Fast membership test: set of all EXIDXFragment pointers produced by
+  // readSection(). Used to distinguish EXIDX fragments from other fragments
+  // (e.g. non-EXIDX fragments that may share the same output section rule).
+  llvm::DenseSet<Fragment *> EXIDXFragSet;
+  EXIDXFragSet.reserve(m_EXIDXFragments.size());
+  for (const auto &KV : m_EXIDXFragments)
+    EXIDXFragSet.insert(KV.second);
+
+  DiagnosticEngine *Diag = config().getDiagEngine();
+
+  // Setup RuleKeys for linker script rule container sorting
+  llvm::DenseMap<RuleContainer *, uint64_t> RuleKey;
+  for (auto &In : *O)
+    RuleKey[In] = MaxSortKey;
+
   for (auto &In : *O) {
     ELFSection *S = In->getSection();
-    if (!exidx)
-      exidx = In->getSection();
-    for (auto &F : S->getFragmentList())
-      Frags.push_back(F);
-    S->clearFragments();
-  }
-
-  if (O->getLastRule()) {
-    exidx = O->getLastRule()->getSection();
-    exidx->setMatchedLinkerScriptRule(O->getLastRule());
-  }
-  for (auto &F : Frags)
-    F->getOwningSection()->setMatchedLinkerScriptRule(
-        exidx->getMatchedLinkerScriptRule());
-  exidx->splice(exidx->getFragmentList().end(), Frags);
-
-  for (auto &F : exidx->getFragmentList()) {
-    for (auto &relocation : F->getOwningSection()->getRelocations()) {
-      // bypass the reloc if the symbol is in the discarded input section
-      ResolveInfo *info = relocation->symInfo();
-
-      if (ResolveInfo::Section == info->type() &&
-          ResolveInfo::Undefined == info->desc())
-        continue;
-
-      // bypass the reloc if the section where it sits will be discarded.
-      if (relocation->targetRef()->frag()->getOwningSection()->isIgnore())
-        continue;
-
-      if (relocation->targetRef()->frag()->getOwningSection()->isDiscard())
-        continue;
-
-      if (0x0 == relocation->type())
-        continue;
-
-      uint64_t reloc_offset = relocation->targetRef()->offset();
-      if (!reloc_offset) {
-        // this is key
-        Fragment *region_frag = relocation->targetRef()->frag();
-        region_frag->setFragmentKind(Fragment::Region);
-
-        Relocator::Address S = getRelocator()->getSymValue(relocation);
-        Relocator::Address key = S + (relocation->target() & 0xFFFFFFFF);
-        region_frag->setOffset(key); // key is used for sorting
-      }
-    } // for all relocations
-  } // for all relocation section
-
-  // Sort fragments by key value stored in offset
-  std::sort(exidx->getFragmentList().begin(), exidx->getFragmentList().end(),
-            [this](Fragment *i, Fragment *j) {
-              Relocator::Address i_offset =
-                  i->getOffset(config().getDiagEngine());
-              Relocator::Address j_offset =
-                  j->getOffset(config().getDiagEngine());
-              return (i_offset < j_offset);
-            });
-
-  // Reset offset to real offset
-  uint64_t offset = 0;
-  for (auto &Frag : exidx->getFragmentList()) {
-    if (Frag->isNull())
+    if (!S)
       continue;
-    Frag->setOffset(offset);
-    offset += 8;
+
+    // Sort key for each fragment in this rule's section: the lowest function
+    // address covered by that fragment. Non-EXIDX fragments are not inserted
+    // here and retain their relative order via OriginalFragOffsets.
+    llvm::DenseMap<Fragment *, uint64_t> FragSortKeys;
+
+    // Pre-sort layout offsets of every fragment in this rule's section.
+    // Used as a stable tiebreaker so fragments with equal keys (or non-EXIDX
+    // fragments) keep their original relative order after stable_sort.
+    llvm::DenseMap<Fragment *, uint32_t> OriginalFragOffsets;
+    bool SawEXIDXFrag = false;
+    for (Fragment *F : S->getFragmentList())
+      OriginalFragOffsets[F] = F->getOffset(Diag);
+
+    for (Fragment *F : S->getFragmentList()) {
+      if (!EXIDXFragSet.contains(F))
+        continue;
+      SawEXIDXFrag = true;
+      FragSortKeys[F] = MaxSortKey;
+
+      EXIDXFragment *EXIDX = dyn_cast<EXIDXFragment>(F);
+      if (!EXIDX)
+        continue;
+      ELFSection *Owning = EXIDX->getOwningSection();
+      if (!Owning)
+        continue;
+      auto &Pieces = EXIDX->getPieces();
+      if (Pieces.empty())
+        continue;
+
+      // Sort key for each 8-byte EXIDX piece (entry) within this fragment,
+      // keyed by the piece's input section offset. Initialised to MaxSortKey
+      // and then narrowed to the lowest function address found via relocations.
+      llvm::DenseMap<uint32_t, uint64_t> SortKeys;
+
+      // Original index of each piece (by input offset) before sorting.
+      // Used as a tiebreaker so pieces with identical function addresses
+      // retain their original order, preserving stable sort semantics.
+      llvm::DenseMap<uint32_t, uint32_t> OriginalOrder;
+      for (uint32_t I = 0, N = Pieces.size(); I != N; ++I) {
+        const uint32_t InputOffset = Pieces[I].InputOffset;
+        SortKeys[InputOffset] = MaxSortKey;
+        OriginalOrder[InputOffset] = I;
+      }
+
+      // The first word of an EXIDX entry anchors the described function.
+      for (Relocation *R : Owning->getRelocations()) {
+        if (!R || !R->targetRef() || R->targetRef()->isNull())
+          continue;
+        if (R->targetRef()->frag() != EXIDX)
+          continue;
+        // R_ARM_NONE (type 0) is a personality-function hint with no address
+        // contribution; skip it to avoid using the personality routine address
+        // as a sort key.
+        if (R->type() == llvm::ELF::R_ARM_NONE)
+          continue;
+
+        const uint32_t RelocOffset = R->targetRef()->offset();
+        EXIDXPiece Piece = EXIDX->getPiece(RelocOffset);
+        if (RelocOffset != Piece.InputOffset)
+          continue;
+
+        int64_t Candidate = static_cast<int64_t>(R->symValue(m_Module)) +
+                            static_cast<int64_t>(R->addend());
+        uint64_t &Key = SortKeys[Piece.InputOffset];
+        Key = std::min(Key, static_cast<uint64_t>(Candidate));
+      }
+
+      const ELFSection *Linked = Owning->getLink();
+      const uint64_t FallbackKey = Linked ? Linked->addr() : MaxSortKey;
+      std::stable_sort(Pieces.begin(), Pieces.end(),
+                       [&](const EXIDXPiece &A, const EXIDXPiece &B) {
+                         uint64_t KeyA = SortKeys.lookup(A.InputOffset);
+                         uint64_t KeyB = SortKeys.lookup(B.InputOffset);
+                         if (KeyA == MaxSortKey)
+                           KeyA = FallbackKey;
+                         if (KeyB == MaxSortKey)
+                           KeyB = FallbackKey;
+                         if (KeyA != KeyB)
+                           return KeyA < KeyB;
+                         return OriginalOrder.lookup(A.InputOffset) <
+                                OriginalOrder.lookup(B.InputOffset);
+                       });
+
+      // Relocations record their target position using input-section offsets.
+      // After sorting, pieces are reordered in the output, so input offset 0
+      // may no longer be output offset 0.
+      for (Relocation *R : Owning->getRelocations()) {
+        if (!R || !R->targetRef() || R->targetRef()->isNull())
+          continue;
+        if (R->targetRef()->frag() != EXIDX)
+          continue;
+        uint32_t NewOffset =
+            EXIDX->translateInputOffset(R->targetRef()->offset());
+        R->targetRef()->setOffset(NewOffset);
+      }
+
+      uint64_t FragKey = MaxSortKey;
+      for (const EXIDXPiece &P : Pieces)
+        FragKey = std::min(FragKey, SortKeys.lookup(P.InputOffset));
+      if (FragKey == MaxSortKey) {
+        const ELFSection *Linked = Owning->getLink();
+        FragKey = Linked ? Linked->addr() : MaxSortKey;
+      }
+      FragSortKeys[F] = FragKey;
+    }
+
+    if (!SawEXIDXFrag)
+      continue;
+
+    std::stable_sort(S->getFragmentList().begin(), S->getFragmentList().end(),
+                     [&](Fragment *A, Fragment *B) {
+                       const bool AIsEXIDX = EXIDXFragSet.contains(A);
+                       const bool BIsEXIDX = EXIDXFragSet.contains(B);
+                       if (AIsEXIDX && BIsEXIDX) {
+                         const uint64_t KeyA = FragSortKeys.lookup(A);
+                         const uint64_t KeyB = FragSortKeys.lookup(B);
+                         if (KeyA != KeyB)
+                           return KeyA < KeyB;
+                       }
+                       return OriginalFragOffsets.lookup(A) <
+                              OriginalFragOffsets.lookup(B);
+                     });
+
+    // Record the minimum key for this rule so we can sort rules below.
+    uint64_t RuleMinKey = MaxSortKey;
+    for (const auto &KV : FragSortKeys)
+      RuleMinKey = std::min(RuleMinKey, KV.second);
+    RuleKey[In] = RuleMinKey;
   }
 
-  O->setFirstNonEmptyRule(exidx->getMatchedLinkerScriptRule());
+  std::stable_sort(O->begin(), O->end(),
+                   [&](RuleContainer *A, RuleContainer *B) {
+                     const uint64_t KeyA = RuleKey.lookup(A);
+                     const uint64_t KeyB = RuleKey.lookup(B);
+                     if (KeyA != KeyB)
+                       return KeyA < KeyB;
+                     return false;
+                   });
+  evaluateAssignments(O);
 
-  // Reset EXIDX symbols.
-  if (m_pEXIDXStart) {
-    m_pEXIDXStart->fragRef()->setFragment(exidx->getFrontFragment());
-    m_pEXIDXStart->fragRef()->setOffset(0);
+  Fragment *FirstEXIDXFrag = nullptr;
+  Fragment *LastEXIDXFrag = nullptr;
+  for (auto &In : *O) {
+    ELFSection *S = In->getSection();
+    if (!S)
+      continue;
+    for (Fragment *F : S->getFragmentList()) {
+      if (F->isNull())
+        continue;
+      if (!EXIDXFragSet.contains(F))
+        continue;
+      if (!F->size())
+        continue;
+      if (!FirstEXIDXFrag)
+        FirstEXIDXFrag = F;
+      LastEXIDXFrag = F;
+    }
   }
-  if (m_pEXIDXEnd) {
-    m_pEXIDXEnd->fragRef()->setFragment(exidx->getBackFragment());
-    m_pEXIDXEnd->fragRef()->setOffset(8);
+
+  // The sentinel was activated in doPreLayout to ensure its 8-byte size was
+  // included in the layout pass.  Here we set the PREL31 target address once
+  // output addresses are available.
+  if (m_pSentinelFrag && m_pSentinelFrag->size() && LastEXIDXFrag) {
+    // The rule's MPSection has no sh_link; use the fragment's owning input
+    // section (the actual .ARM.exidx.* section) to resolve the linked .text
+    // output section whose addr() is set by layout.
+    auto *LastEXIDX = dyn_cast<EXIDXFragment>(LastEXIDXFrag);
+    ELFSection *OwningSection =
+        LastEXIDX ? LastEXIDX->getOwningSection() : nullptr;
+    ELFSection *InputLink = OwningSection ? OwningSection->getLink() : nullptr;
+    ELFSection *LastLinkedSection =
+        InputLink ? InputLink->getOutputELFSection() : nullptr;
+    if (LastLinkedSection)
+      m_pSentinelFrag->setTargetAddr(LastLinkedSection->addr() +
+                                     LastLinkedSection->size());
+  }
+
+  if (m_pEXIDXStart && FirstEXIDXFrag)
+    m_pEXIDXStart->setFragmentRef(make<FragmentRef>(*FirstEXIDXFrag, 0));
+  // __exidx_end points past the sentinel (the true end of the EXIDX table).
+  if (m_pEXIDXEnd && m_pSentinelFrag && m_pSentinelFrag->size()) {
+    m_pEXIDXEnd->setFragmentRef(
+        make<FragmentRef>(*m_pSentinelFrag, m_pSentinelFrag->size()));
+  } else if (m_pEXIDXEnd && LastEXIDXFrag) {
+    m_pEXIDXEnd->setFragmentRef(
+        make<FragmentRef>(*LastEXIDXFrag, LastEXIDXFrag->size()));
   }
 }
 
 bool ARMGNULDBackend::readSection(InputFile &pInput, ELFSection *S) {
-  // We need break them down to individual entry
-  if (auto *EXIDX = llvm::dyn_cast<ARMEXIDXSection>(S)) {
-    uint32_t Offset = 0;
+  // Keep one EXIDX fragment per section and track entry offsets as pieces.
+  if (S->isEXIDX()) {
+    llvm::StringRef Region = pInput.getSlice(S->offset(), S->size());
+    EXIDXFragment *EXIDX = make<EXIDXFragment>(Region, S, S->getAddrAlign());
+    m_EXIDXFragments[S] = EXIDX;
     LayoutInfo *layoutInfo = getModule().getLayoutInfo();
+    S->addFragment(EXIDX);
     for (uint32_t i = 0; i < S->size(); i += 8) {
-      llvm::StringRef region = pInput.getSlice(S->offset() + i, 8);
-      Fragment *frag = make<RegionFragment>(region, S, Fragment::Type::Region,
-                                            S->getAddrAlign());
-      if (layoutInfo)
-        layoutInfo->recordFragment(&pInput, S, frag);
-      EXIDX->addFragment(frag);
-      EXIDX->addEntry({Offset, frag});
-      Offset += 8;
+      const uint32_t PieceSize = (S->size() - i >= 8) ? 8 : (S->size() - i);
+      EXIDX->addPiece({i, PieceSize});
     }
+    if (layoutInfo)
+      layoutInfo->recordFragment(&pInput, S, EXIDX);
     return true;
   }
   if (S->getType() == llvm::ELF::SHT_ARM_ATTRIBUTES) {
@@ -525,7 +551,7 @@ void ARMGNULDBackend::doPostLayout() {
                          m_Module.getConfig().options().printTimingStats());
     ELFSection *exidx =
         m_Module.getScript().sectionMap().find(llvm::ELF::SHT_ARM_EXIDX);
-    if (exidx && exidx->size())
+    if (exidx)
       sortEXIDX();
   }
 
@@ -569,9 +595,17 @@ void ARMGNULDBackend::initSegmentFromLinkerScript(ELFSegment *pSegment) {
   }
 }
 
-/// dynamic - the dynamic section of the target machine.
-/// Use co-variant return type to return its own dynamic section.
-ARMELFDynamic *ARMGNULDBackend::dynamic() { return m_pDynamic; }
+void ARMGNULDBackend::reserveTargetDynamicEntries() {
+  m_pDynamic->reserveOne(llvm::ELF::DT_RELCOUNT);
+}
+
+void ARMGNULDBackend::applyTargetDynamicEntries() {
+  uint32_t relaCount = 0;
+  for (auto &R : getRelaDyn()->getRelocations())
+    if (R->type() == llvm::ELF::R_ARM_RELATIVE)
+      relaCount++;
+  m_pDynamic->applyOne(llvm::ELF::DT_RELCOUNT, relaCount);
+}
 
 void ARMGNULDBackend::defineGOTSymbol(Fragment &pFrag) {
   // define symbol _GLOBAL_OFFSET_TABLE_
@@ -608,6 +642,31 @@ bool ARMGNULDBackend::finalizeScanRelocations() {
       frag = *GOTPLT->getFragmentList().begin();
   if (frag)
     defineGOTSymbol(*frag);
+
+  if (!config().isCodeStatic())
+    return true;
+
+  // For an IFunc symbol that is both referenced directly (its address is
+  // taken via an absolute / PC-relative reloc, which resolves to PLT[ifunc])
+  // and referenced through the GOT, we materialize a dedicated GOT slot that
+  // holds the address of PLT[ifunc]. GOT references then resolve to this slot
+  // rather than the GOTPLT slot, so that the GOT-loaded pointer equals the
+  // direct-reference pointer (pointer equality).
+  for (auto &[symInfo, plt] : m_PLTMap) {
+    if (!symInfo->isIFunc() || !symInfo->hasIFuncDirectRef() ||
+        !symInfo->hasIFuncNeedsGOT())
+      continue;
+    ELFObjectFile *PLTSlotObjFile =
+        llvm::cast<ELFObjectFile>(plt->getOwningSection()->getInputFile());
+    ARMGOT *G = createGOT(GOT::Regular, PLTSlotObjFile, symInfo);
+    FragmentRef *PLTFragRef = make<FragmentRef>(*plt, 0);
+    Relocation *r = Relocation::Create(llvm::ELF::R_ARM_ABS32, 32,
+                                       make<FragmentRef>(*G, 0), 0);
+    PLTSlotObjFile->getGOT()->addRelocation(r);
+    r->modifyRelocationFragmentRef(PLTFragRef);
+    // createGOT(GOT::Regular, ...) already calls recordGOT for symInfo.
+    symInfo->setReserved(symInfo->reserved() | Relocator::ReserveGOT);
+  }
   return true;
 }
 
@@ -617,57 +676,8 @@ ARMGNULDBackend::emitSection(ELFSection *pSection,
   return GNULDBackend::emitSection(pSection, pRegion);
 }
 
-void ARMGNULDBackend::defineIRelativeRange(ResolveInfo &pSym) {
-  // It is up to linker script to define those symbols.
-  if (m_Module.getScript().linkerScriptHasSectionsCommand())
-    return;
-
-  // Define the copy symbol in the bss section and resolve it
-  if (!m_pIRelativeStart && !m_pIRelativeEnd) {
-    auto SymbolName = "__rel_iplt_start";
-    m_pIRelativeStart =
-        m_Module.getIRBuilder()
-            ->addSymbol<IRBuilder::Force, IRBuilder::Resolve>(
-                m_Module.getInternalInput(Module::Script), SymbolName,
-                ResolveInfo::Object, ResolveInfo::Define,
-                (ResolveInfo::Binding)pSym.binding(),
-                0,   // size
-                0x0, // value
-                FragmentRef::null(), (ResolveInfo::Visibility)pSym.other());
-
-    m_pIRelativeStart->setShouldIgnore(false);
-    if (m_Module.getConfig().options().isSymbolTracingRequested() &&
-        m_Module.getConfig().options().traceSymbol(SymbolName))
-      config().raise(Diag::target_specific_symbol) << SymbolName;
-    SymbolName = "__rel_iplt_end";
-    m_pIRelativeEnd =
-        m_Module.getIRBuilder()
-            ->addSymbol<IRBuilder::Force, IRBuilder::Resolve>(
-                m_Module.getInternalInput(Module::Script), SymbolName,
-                ResolveInfo::Object, ResolveInfo::Define,
-                (ResolveInfo::Binding)pSym.binding(),
-                pSym.size(), // size
-                0x0,         // value
-                FragmentRef::null(), (ResolveInfo::Visibility)pSym.other());
-
-    m_pIRelativeEnd->setShouldIgnore(false);
-    if (m_Module.getConfig().options().isSymbolTracingRequested() &&
-        m_Module.getConfig().options().traceSymbol(SymbolName))
-      config().raise(Diag::target_specific_symbol) << SymbolName;
-  }
-}
-
 /// finalizeSymbol - finalize the symbol value
-bool ARMGNULDBackend::finalizeTargetSymbols() {
-  if (m_pIRelativeStart && m_pIRelativeEnd) {
-    m_pIRelativeStart->setValue(
-        getRelaPLT()->getOutputSection()->getSection()->addr());
-    m_pIRelativeEnd->setValue(
-        getRelaPLT()->getOutputSection()->getSection()->addr() +
-        getRelaPLT()->getOutputSection()->getSection()->size());
-  }
-  return true;
-}
+bool ARMGNULDBackend::finalizeTargetSymbols() { return true; }
 
 void ARMGNULDBackend::finalizeBeforeWrite() {
   // Update __RWPI_BASE__
@@ -828,7 +838,6 @@ void ARMGNULDBackend::mayBeRelax(int, bool &pFinished) {
     return;
   }
   assert(nullptr != getStubFactory() && nullptr != getBRIslandFactory());
-  ELFFileFormat *file_format = getOutputFormat();
   pFinished = true;
 
   // check branch relocs and create the related stubs if needed
@@ -871,8 +880,8 @@ void ARMGNULDBackend::mayBeRelax(int, bool &pFinished) {
               break;
             default: {
               // a stub symbol should be local
-              ELFSection &symtab = *file_format->getSymTab();
-              ELFSection &strtab = *file_format->getStrTab();
+              ELFSection &symtab = *getSymTab();
+              ELFSection &strtab = *getStrTab();
 
               // increase the size of .symtab and .strtab if needed
               symtab.setSize(symtab.size() + sizeof(llvm::ELF::Elf32_Sym));
@@ -1036,11 +1045,7 @@ bool ARMGNULDBackend::ltoCallExternalAssembler(const std::string &Input,
 // Create GOT entry.
 ARMGOT *ARMGNULDBackend::createGOT(GOT::GOTType T, ELFObjectFile *Obj,
                                    ResolveInfo *R, bool SkipPLTRef) {
-  if (R != nullptr && ((config().options().isSymbolTracingRequested() &&
-                        config().options().traceSymbol(*R)) ||
-                       m_Module.getPrinter()->traceDynamicLinking()))
-    config().raise(Diag::create_got_entry)
-        << GOT::getGOTTypeAsStr(T) << R->name();
+  traceGOTCreation(T, R);
   // If we are creating a GOT, always create a .got.plt.
   if (!getGOTPLT()->hasFragments()) {
     // TODO: This should be GOT0, not GOTPLT0.
@@ -1120,10 +1125,7 @@ int64_t ARMGNULDBackend::getPLTAddr(ResolveInfo *pInfo) const {
 ARMPLT *ARMGNULDBackend::createPLT(ELFObjectFile *Obj, ResolveInfo *R,
                                    bool isIRelative) {
   bool hasNow = config().options().hasNow();
-  if (R != nullptr && ((config().options().isSymbolTracingRequested() &&
-                        config().options().traceSymbol(*R)) ||
-                       m_Module.getPrinter()->traceDynamicLinking()))
-    config().raise(Diag::create_plt_entry) << R->name();
+  tracePLTCreation(R);
 
   reportErrorIfPLTIsDiscarded(R);
 
@@ -1188,13 +1190,13 @@ void ARMGNULDBackend::initializeAttributes() {
 bool ARMGNULDBackend::handleRelocation(ELFSection *Section,
                                        Relocation::Type Type, LDSymbol &Sym,
                                        uint32_t Offset,
-                                       Relocation::Address Addend,
-                                       bool LastVisit) {
-  if (auto *EXIDX = llvm::dyn_cast<ARMEXIDXSection>(Section)) {
-    EXIDXEntry Entry = EXIDX->getEntry(Offset);
-    Relocation *R = eld::IRBuilder::addRelocation(
-        getRelocator(), *Entry.Frag, Type, Sym, Offset - Entry.InputOffset);
-    EXIDX->addRelocation(R);
+                                       Relocation::Address Addend) {
+  auto It = m_EXIDXFragments.find(Section);
+  if (It != m_EXIDXFragments.end()) {
+    (void)It->second->getPiece(Offset);
+    Relocation *R = eld::IRBuilder::addRelocation(getRelocator(), *It->second,
+                                                  Type, Sym, Offset);
+    Section->addRelocation(R);
     return true;
   }
   return false;

@@ -13,7 +13,6 @@
 
 #include "AArch64LDBackend.h"
 #include "AArch64.h"
-#include "AArch64ELFDynamic.h"
 #include "AArch64Errata843419Stub.h"
 #include "AArch64FarcallStub.h"
 #include "AArch64Info.h"
@@ -34,7 +33,7 @@
 #include "eld/Support/RegisterTimer.h"
 #include "eld/Support/TargetRegistry.h"
 #include "eld/SymbolResolver/IRBuilder.h"
-#include "eld/Target/ELFFileFormat.h"
+#include "eld/Target/ELFDynamic.h"
 #include "eld/Target/ELFSegment.h"
 #include "eld/Target/ELFSegmentFactory.h"
 #include "eld/Target/TargetInfo.h"
@@ -54,11 +53,9 @@ using namespace llvm;
 //===----------------------------------------------------------------------===//
 // AArch64LDBackend
 //===----------------------------------------------------------------------===//
-AArch64LDBackend::AArch64LDBackend(eld::Module &pModule,
-                                                 TargetInfo *pInfo)
+AArch64LDBackend::AArch64LDBackend(eld::Module &pModule, TargetInfo *pInfo)
     : GNULDBackend(pModule, pInfo), m_pErrata843419Factory(nullptr),
       m_pAArch64ErrataIslandFactory(nullptr), m_pRelocator(nullptr),
-      m_pDynamic(nullptr), m_pIRelativeStart(nullptr), m_pIRelativeEnd(nullptr),
       m_ptdata(nullptr), m_ptbss(nullptr) {}
 
 AArch64LDBackend::~AArch64LDBackend() {}
@@ -203,11 +200,6 @@ Relocation::Type AArch64LDBackend::getCopyRelType() const {
 }
 
 void AArch64LDBackend::doPreLayout() {
-  // initialize .dynamic data
-  if ((!config().isCodeStatic() || config().options().forceDynamic()) &&
-      nullptr == m_pDynamic)
-    m_pDynamic = make<AArch64ELFDynamic>(*this, config());
-
   if (LinkerConfig::Object != config().codeGenType()) {
     getRelaPLT()->setSize(getRelaPLT()->getRelocationCount() *
                           getRelaEntrySize());
@@ -258,7 +250,19 @@ void AArch64LDBackend::initSegmentFromLinkerScript(
   }
 }
 
-AArch64ELFDynamic *AArch64LDBackend::dynamic() { return m_pDynamic; }
+void AArch64LDBackend::reserveTargetDynamicEntries() {
+  m_pDynamic->reserveOne(llvm::ELF::DT_RELACOUNT);
+}
+
+void AArch64LDBackend::applyTargetDynamicEntries() {
+  uint32_t relaCount = 0;
+  for (auto &R : getRelaDyn()->getRelocations()) {
+    if (R->type() == llvm::ELF::R_AARCH64_RELATIVE ||
+        R->type() == llvm::ELF::R_AARCH64_AUTH_RELATIVE)
+      relaCount++;
+  }
+  m_pDynamic->applyOne(llvm::ELF::DT_RELACOUNT, relaCount);
+}
 
 unsigned int AArch64LDBackend::getTargetSectionOrder(
     const ELFSection &pSectHdr) const {
@@ -287,7 +291,6 @@ void AArch64LDBackend::mayBeRelax(int pass, bool &pFinished) {
   }
 
   assert(nullptr != getStubFactory() && nullptr != getBRIslandFactory());
-  ELFFileFormat *file_format = getOutputFormat();
   pFinished = true;
 
   if (config().options().fixCortexA53Erratum843419() && pass == 0) {
@@ -326,8 +329,8 @@ void AArch64LDBackend::mayBeRelax(int pass, bool &pFinished) {
               break;
             default: {
               // a stub symbol should be local
-              ELFSection &symtab = *file_format->getSymTab();
-              ELFSection &strtab = *file_format->getStrTab();
+              ELFSection &symtab = *getSymTab();
+              ELFSection &strtab = *getStrTab();
 
               // increase the size of .symtab and .strtab if needed
               symtab.setSize(symtab.size() + sizeof(llvm::ELF::Elf64_Sym));
@@ -470,8 +473,8 @@ void AArch64LDBackend::createErratum843419Stub(Fragment *frag,
   case GeneralOptions::StripLocals:
     break;
   default: {
-    ELFSection &symtab = *(getOutputFormat()->getSymTab());
-    ELFSection &strtab = *(getOutputFormat()->getStrTab());
+    ELFSection &symtab = *(getSymTab());
+    ELFSection &strtab = *(getStrTab());
     symtab.setSize(symtab.size() + (sizeof(llvm::ELF::Elf64_Sym) * 2));
     symtab.setInfo(symtab.getInfo() + 2);
     strtab.setSize(strtab.size() + (branchIsland->symInfo()->nameSize() * 2) +
@@ -520,54 +523,7 @@ void AArch64LDBackend::createErratum843419Stub(Fragment *frag,
   } // for all relocation section
 }
 
-void AArch64LDBackend::defineIRelativeRange(ResolveInfo &pSym) {
-  // It is up to linker script to define those symbols.
-  if (m_Module.getScript().linkerScriptHasSectionsCommand())
-    return;
-
-  // Define the copy symbol in the bss section and resolve it
-  auto SymbolName = "__rela_iplt_start";
-  if (!m_pIRelativeStart && !m_pIRelativeEnd) {
-    m_pIRelativeStart =
-        m_Module.getIRBuilder()
-            ->addSymbol<IRBuilder::Force, IRBuilder::Resolve>(
-                m_Module.getInternalInput(Module::Script), SymbolName,
-                ResolveInfo::Object, ResolveInfo::Define,
-                (ResolveInfo::Binding)pSym.binding(),
-                0,   // size
-                0x0, // value
-                FragmentRef::null(), (ResolveInfo::Visibility)pSym.other());
-    if (m_Module.getConfig().options().isSymbolTracingRequested() &&
-        m_Module.getConfig().options().traceSymbol(SymbolName)) {
-      config().raise(Diag::target_specific_symbol) << SymbolName;
-    }
-    m_pIRelativeStart->setShouldIgnore(false);
-    SymbolName = "__rela_iplt_end";
-    m_pIRelativeEnd =
-        m_Module.getIRBuilder()
-            ->addSymbol<IRBuilder::Force, IRBuilder::Resolve>(
-                m_Module.getInternalInput(Module::Script), SymbolName,
-                ResolveInfo::Object, ResolveInfo::Define,
-                (ResolveInfo::Binding)pSym.binding(),
-                pSym.size(), // size
-                0x0,         // value
-                FragmentRef::null(), (ResolveInfo::Visibility)pSym.other());
-    if (m_Module.getConfig().options().isSymbolTracingRequested() &&
-        m_Module.getConfig().options().traceSymbol(SymbolName)) {
-      config().raise(Diag::target_specific_symbol) << SymbolName;
-    }
-    m_pIRelativeEnd->setShouldIgnore(false);
-  }
-}
-
 bool AArch64LDBackend::finalizeTargetSymbols() {
-  if (m_pIRelativeStart && m_pIRelativeEnd) {
-    m_pIRelativeStart->setValue(
-        getRelaPLT()->getOutputSection()->getSection()->addr());
-    m_pIRelativeEnd->setValue(
-        getRelaPLT()->getOutputSection()->getSection()->addr() +
-        getRelaPLT()->getOutputSection()->getSection()->size());
-  }
   if (m_pGOTSymbol) {
     m_pGOTSymbol->setValue(getGOT()->getOutputSection()->getSection()->addr());
   }
@@ -717,11 +673,7 @@ AArch64GOT *AArch64LDBackend::createGOT(GOT::GOTType T,
                                                ResolveInfo *R,
                                                bool SkipPLTRef) {
 
-  if (R != nullptr && ((config().options().isSymbolTracingRequested() &&
-                        config().options().traceSymbol(*R)) ||
-                       m_Module.getPrinter()->traceDynamicLinking()))
-    config().raise(Diag::create_got_entry)
-        << GOT::getGOTTypeAsStr(T) << R->name();
+  traceGOTCreation(T, R);
   // If we are creating a GOT, always create a .got.plt.
   if (!getGOTPLT()->hasFragments()) {
     // TODO: This should be GOT0, not GOTPLT0.
@@ -795,10 +747,7 @@ AArch64GOT *AArch64LDBackend::findEntryInGOT(ResolveInfo *I) const {
 AArch64PLT *AArch64LDBackend::createPLT(ELFObjectFile *Obj, ResolveInfo *R,
                                         bool isIRelative) {
   // If there is no entries GOTPLT and PLT, we dont have a PLT0.
-  if (R != nullptr && ((config().options().isSymbolTracingRequested() &&
-                        config().options().traceSymbol(*R)) ||
-                       m_Module.getPrinter()->traceDynamicLinking()))
-    config().raise(Diag::create_plt_entry) << R->name();
+  tracePLTCreation(R);
 
   reportErrorIfPLTIsDiscarded(R);
 

@@ -35,9 +35,9 @@ class ELFSection;
 class Assignment : public ScriptCommand {
 public:
   enum Level {
-    BEFORE_SECTIONS,  // Assignments before SECTIONS command
-    AFTER_SECTIONS,   // Assignments after SECTIONS command
-    INPUT_SECTION,    // related to an input section
+    BEFORE_SECTIONS, // Assignments before SECTIONS command
+    AFTER_SECTIONS,  // Assignments after SECTIONS command
+    INPUT_SECTION,   // related to an input section
     SECTIONS_END
   };
 
@@ -46,8 +46,6 @@ public:
 public:
   Assignment(Level AssignmentLevel, Type AssignmentType, std::string Symbol,
              Expression *ScriptExpression);
-
-
 
   Level level() const { return AssignmentLevel; }
 

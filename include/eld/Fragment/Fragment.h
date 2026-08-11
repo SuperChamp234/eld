@@ -51,6 +51,9 @@ public:
     MergeString,
     BuildID,
     SFrame,
+    DynStr,
+    DynSym,
+    Dynamic,
 #ifdef ELD_ENABLE_SYMBOL_VERSIONING
     GNUVerDef,
     GNUVerSym,

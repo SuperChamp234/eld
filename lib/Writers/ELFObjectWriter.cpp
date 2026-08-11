@@ -32,7 +32,6 @@
 #include "eld/SymbolResolver/IRBuilder.h"
 #include "eld/SymbolResolver/LDSymbol.h"
 #include "eld/SymbolResolver/ResolveInfo.h"
-#include "eld/Target/ELFFileFormat.h"
 #include "eld/Target/ELFSegment.h"
 #include "eld/Target/ELFSegmentFactory.h"
 #include "eld/Target/GNULDBackend.h"
@@ -188,11 +187,8 @@ ELFObjectWriter::writeObject(llvm::FileOutputBuffer &CurOutput) {
   assert(IsDynobj || IsExec || IsBinary || IsObject);
 
   if (IsDynobj || IsExec) {
-    // Write out name pool sections: .dynsym, .dynstr, .hash
-    eld::RegisterTimer T("Emit Dynamic Name Pool sections", "Emit Output File",
-                         ThisModule.getConfig().options().printTimingStats());
-    if (!ThisModule.getBackend().emitDynNamePools(CurOutput))
-      return make_error_code(std::errc::function_not_supported);
+    // Dynamic sections are now emitted by their fragments during the regular
+    // section-writing loop, with entries applied by DynamicFragment::emit()
   }
 
   if (IsObject || IsDynobj || IsExec) {
@@ -266,8 +262,7 @@ ELFObjectWriter::writeObject(llvm::FileOutputBuffer &CurOutput) {
       }
     }
 
-    emitShStrTab(ThisModule.getBackend().getOutputFormat()->getShStrTab(),
-                 CurOutput);
+    emitShStrTab(ThisModule.getBackend().getShStrTab(), CurOutput);
 
     if (ThisModule.getConfig().targets().is32Bits()) {
       // Write out ELF header
@@ -414,7 +409,7 @@ void ELFObjectWriter::emitSectionHeader(
     Shdr[SectIdx].sh_name = Shstridx;
     Shdr[SectIdx].sh_type = LdSect->getType();
     Shdr[SectIdx].sh_flags = LdSect->getFlags();
-    Shdr[SectIdx].sh_addr = (LdSect->isAlloc()) ? LdSect->addr() : 0;
+    Shdr[SectIdx].sh_addr = LdSect->addr();
     Shdr[SectIdx].sh_offset = LdSect->offset();
     if (SectIdx == 0 && ThisModule.size() >= SHN_LORESERVE)
       Shdr[SectIdx].sh_size = ThisModule.size();
@@ -717,40 +712,43 @@ uint64_t ELFObjectWriter::getSectEntrySize(ELFSection *CurSection) const {
 uint64_t ELFObjectWriter::getSectLink(const ELFSection *S) const {
   ELFSection *Link = nullptr;
   if (S->isGroupKind())
-    Link = ThisModule.getBackend().getOutputFormat()->getSymTab();
+    Link = ThisModule.getBackend().getSymTab();
   if (llvm::ELF::SHT_SYMTAB == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getStrTab();
+    Link = ThisModule.getBackend().getStrTab();
   if (llvm::ELF::SHT_SYMTAB_SHNDX == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getSymTab();
+    Link = ThisModule.getBackend().getSymTab();
   if (llvm::ELF::SHT_DYNSYM == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getDynStrTab();
+    Link = ThisModule.getBackend().getDynStrSection();
   if (llvm::ELF::SHT_DYNAMIC == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getDynStrTab();
+    Link = ThisModule.getBackend().getDynStrSection();
   if (llvm::ELF::SHT_HASH == S->getType() ||
       llvm::ELF::SHT_GNU_HASH == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getDynSymTab();
+    Link = ThisModule.getBackend().getDynSymSection();
 #ifdef ELD_ENABLE_SYMBOL_VERSIONING
   if (llvm::ELF::SHT_GNU_versym == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getDynSymTab();
+    Link = ThisModule.getBackend().getDynSymSection();
   if (llvm::ELF::SHT_GNU_verdef == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getDynStrTab();
+    Link = ThisModule.getBackend().getDynStrSection();
   if (llvm::ELF::SHT_GNU_verneed == S->getType())
-    Link = ThisModule.getBackend().getOutputFormat()->getDynStrTab();
+    Link = ThisModule.getBackend().getDynStrSection();
 #endif
   if (ThisModule.getConfig().isLinkPartial() &&
-      llvm::ELF::SHF_LINK_ORDER & S->getFlags())
+      llvm::ELF::SHF_LINK_ORDER & S->getFlags() && S->getLink())
     return S->getLink()->getOutputSection()->getSection()->getIndex();
   if (S->isRelocationSection()) {
     if (S->getKind() != LDFileFormat::DynamicRelocation)
-      Link = ThisModule.getBackend().getOutputFormat()->getSymTab();
+      Link = ThisModule.getBackend().getSymTab();
     else
-      Link = ThisModule.getBackend().getOutputFormat()->getDynSymTab();
+      Link = ThisModule.getBackend().getDynSymSection();
   }
   if (!Link)
     return ThisModule.getBackend().getSectLink(S);
 
   if (Link->isIgnore() || Link->isDiscard())
     return 0;
+  // For internal (input) sections, return the output section index.
+  if (ELFSection *OutSect = Link->getOutputELFSection())
+    return OutSect->getIndex();
   return Link->getIndex();
 }
 

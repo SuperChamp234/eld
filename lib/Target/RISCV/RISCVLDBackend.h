@@ -15,7 +15,10 @@
 #include "eld/Readers/ELFSection.h"
 #include "eld/SymbolResolver/IRBuilder.h"
 #include "eld/Target/GNULDBackend.h"
+#include "llvm/ADT/DenseSet.h"
+#include <cstdint>
 #include <unordered_set>
+#include <vector>
 
 namespace eld {
 
@@ -23,7 +26,6 @@ class LinkerConfig;
 class RISCVInfo;
 class RISCVAttributeFragment;
 class RISCVTableJumpFragment;
-class RISCVELFDynamic;
 class RISCVPLT;
 class RISCVRelaxationStats;
 
@@ -48,13 +50,15 @@ public:
 
   void initDynamicSections(ELFObjectFile &) override;
 
-  void initPatchSections(ELFObjectFile &) override;
-
   void initTargetSymbols() override;
 
   bool initBRIslandFactory() override;
 
   bool initStubFactory() override;
+
+  bool hasRelax(const Relocation &R) const {
+    return m_RelocsWithRelax.find(&R) != m_RelocsWithRelax.end();
+  }
 
   void preRelaxation() override;
 
@@ -66,7 +70,8 @@ public:
   /// finalizeTargetSymbols - finalize the symbol value
   bool finalizeTargetSymbols() override;
 
-  ELFDynamic *dynamic() override;
+  void reserveTargetDynamicEntries() override;
+  void applyTargetDynamicEntries() override;
 
   void evaluateTargetSymbolsBeforeRelaxation() override;
 
@@ -81,8 +86,7 @@ public:
 
   bool handleRelocation(ELFSection *pSection, Relocation::Type pType,
                         LDSymbol &pSym, uint32_t pOffset,
-                        Relocation::Address pAddend = 0,
-                        bool pLastPass = false) override;
+                        Relocation::Address pAddend) override;
 
   // Handle the relocations that handleRelocation() could not process.
   bool handlePendingRelocations(ELFSection *S) override;
@@ -120,10 +124,6 @@ public:
                       bool isIRelative = false);
 
   void recordPLT(ResolveInfo *, RISCVPLT *);
-
-  /// defineIRelativeRange - define __rela_iplt_start/__rela_iplt_end symbols
-  /// for IFunc support in static linking
-  void defineIRelativeRange(ResolveInfo &pSym);
 
   RISCVPLT *findEntryInPLT(ResolveInfo *) const;
 
@@ -194,7 +194,7 @@ public:
     return reloc->second;
   }
 
-  const Relocation *getBaseReloc(const Relocation &R) const {
+  Relocation *getBaseReloc(const Relocation &R) const {
     auto reloc = m_BaseRelocs.find(&R);
     if (reloc == m_BaseRelocs.end())
       return nullptr;
@@ -230,13 +230,10 @@ public:
 private:
   void initTableJump();
 
-  Relocation *findHIRelocation(ELFSection *S, uint64_t Value);
-
   // This is `handleRelocation` for internal RISC-V relocations IDs.
   bool handleVendorRelocation(ELFSection *pSection,
                               Relocation::Type pInternalType, LDSymbol &pSym,
-                              uint32_t pOffset, Relocation::Address pAddend = 0,
-                              bool pLastPass = false);
+                              uint32_t pOffset, Relocation::Address pAddend);
 
   void relaxDeleteBytes(llvm::StringRef Name, RegionFragmentEx &Region,
                         uint64_t Offset, unsigned NumBytes,
@@ -282,8 +279,28 @@ private:
   bool doRelaxationAlign(Relocation *R);
 
   bool doRelaxationPC(Relocation *R, Relocation::DWord G);
+  bool doRelaxationGOT(Relocation &R);
 
   bool doRelaxationTLSDESC(Relocation &R, bool Relax);
+
+  // Records a call relaxation (AUIPC+JALR → C.J/JAL) so it can be reversed
+  // post-ALIGN if the final distance no longer fits the relaxed form.
+  struct CallRelaxRecord {
+    RegionFragmentEx *region;
+    Relocation *reloc;
+    uint64_t relocOffset; // fragment-relative offset of the AUIPC instruction
+    uint32_t auipcBytes;  // original AUIPC instruction bytes
+    uint32_t jalrBytes;   // original JALR instruction bytes (at relocOffset+4)
+    uint32_t
+        relaxedSize; // size in bytes of the relaxed instruction (2=C.J, 4=JAL)
+    bool rolledBack = false;
+  };
+
+  void recordCallRelaxation(RegionFragmentEx &Region, Relocation *Reloc,
+                            uint64_t Offset, uint32_t AuipcBytes,
+                            uint32_t JalrBytes, uint32_t RelaxedSize);
+
+  void verifyAndRollbackCallRelaxations(bool &pFinished);
 
   /// getRelEntrySize - the size in BYTE of rela type relocation
   size_t getRelEntrySize() override { return 0; }
@@ -315,6 +332,24 @@ private:
   /// postProcessing - Backend can do any needed modification in the final stage
   eld::Expected<void> postProcessing(llvm::FileOutputBuffer &pOutput) override;
 
+  const llvm::SmallVectorImpl<const Relocation *> *
+  getBaseRelocRefs(const Relocation &R) const {
+    auto Refs = m_BaseRelocRefs.find(&R);
+    if (Refs == m_BaseRelocRefs.end())
+      return nullptr;
+    return &Refs->second;
+  }
+
+  void setRelocGOTLoadRelaxed(const Relocation *R) {
+    m_RelaxedGOTLoadRelocs.insert(R);
+  }
+
+  bool relocWasGOTLoadRelaxed(const Relocation *R) const {
+    return m_RelaxedGOTLoadRelocs.count(R);
+  }
+
+  bool allGOTLOsRelaxable(const Relocation &HIReloc) const;
+
 private:
   ELFSection *createGOTSection(InputFile &InputFile);
   ELFSection *createGOTPLTSection(InputFile &InputFile);
@@ -332,30 +367,25 @@ private:
   /// A map to keep track of the relocation that defines the base address for
   /// relative relocations. This is a concept in RISC-V and applies to
   /// relocations consisting of a HI20 and LO12 pairs.
-  llvm::DenseMap<const Relocation *, const Relocation *> m_BaseRelocs;
+  llvm::DenseMap<const Relocation *, Relocation *> m_BaseRelocs;
+
+  /// Identify relocations that have an associated R_RISCV_RELAX.
+  llvm::DenseSet<const Relocation *> m_RelocsWithRelax;
 
 private:
   /// RISCV Attribute Section
   ELFSection *m_pRISCVAttributeSection = nullptr;
   ELFSection *m_pRISCVTableJumpSection = nullptr;
-  // RISCV Dynamic section
-  RISCVELFDynamic *m_pDynamic = nullptr;
   /// RISCV Attribute Fragment
   RISCVAttributeFragment *AttributeFragment = nullptr;
   RISCVTableJumpFragment *TableJumpFragment = nullptr;
   bool TableJumpInitialized = false;
-
-  LDSymbol *m_pIRelativeStart = nullptr;
-  LDSymbol *m_pIRelativeEnd = nullptr;
+  LDSymbol *m_pJvtBase = nullptr;
 
   llvm::DenseMap<ResolveInfo *, RISCVGOT *> m_GOTMap;
   llvm::DenseMap<ResolveInfo *, RISCVGOT *> m_GOTPLTMap;
   llvm::DenseMap<ResolveInfo *, RISCVPLT *> m_PLTMap;
   std::vector<ResolveInfo *> m_LabeledSymbols;
-  using PendingRelocInfo =
-      std::tuple<ELFSection *, Relocation::Type, LDSymbol *, uint32_t,
-                 Relocation::Address>;
-  std::vector<PendingRelocInfo> m_PendingRelocations;
   std::unordered_set<Relocation *> m_DisableGPRelocs;
   Relocator *m_pRelocator = nullptr;
   LDSymbol *m_pGlobalPointer = nullptr;
@@ -369,6 +399,16 @@ private:
   // A map from HI relocations to the relocations that should be used as a base
   // address for the load instruction during TLSDESC to IE optimization.
   std::unordered_map<const Relocation *, const Relocation *> m_HiToIELoadBase;
+
+  // A map to keep track of all relocations referencing a particular
+  // base relocation. This is effectively a reverse-mapping of `m_BaseRelocs`.
+  llvm::DenseMap<const Relocation *, llvm::SmallVector<const Relocation *, 1>>
+      m_BaseRelocRefs;
+
+  llvm::DenseSet<const Relocation *> m_RelaxedGOTLoadRelocs;
+
+  // JAL-relaxed call records for post-ALIGN range reverification.
+  std::vector<CallRelaxRecord> m_CallRelaxRecords;
 };
 } // namespace eld
 

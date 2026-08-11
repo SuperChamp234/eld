@@ -54,6 +54,7 @@ DECL_RISCV_APPLY_RELOC_FUNC(applyJumpOrCall)
 DECL_RISCV_APPLY_RELOC_FUNC(applyAlign)
 DECL_RISCV_APPLY_RELOC_FUNC(applyGPRel)
 DECL_RISCV_APPLY_RELOC_FUNC(applyCompressedLUI)
+DECL_RISCV_APPLY_RELOC_FUNC(applyCompressedLI)
 DECL_RISCV_APPLY_RELOC_FUNC(applyTprelAdd)
 DECL_RISCV_APPLY_RELOC_FUNC(applyGOT)
 DECL_RISCV_APPLY_RELOC_FUNC(applyXqciloAbs)
@@ -205,6 +206,7 @@ RelocationDescMap RelocDescs = {
 
     /* Internal Relocations for Relaxation */
     INTERNAL_RELOC_DESC_ENTRY(R_RISCV_RVC_LUI, applyCompressedLUI),
+    INTERNAL_RELOC_DESC_ENTRY(R_RISCV_RVC_LI, applyCompressedLI),
     INTERNAL_RELOC_DESC_ENTRY(R_RISCV_GPREL_I, applyGPRel),
     INTERNAL_RELOC_DESC_ENTRY(R_RISCV_GPREL_S, applyGPRel),
     INTERNAL_RELOC_DESC_ENTRY(R_RISCV_TPREL_I, unsupported),
@@ -288,6 +290,12 @@ RISCVGOT &CreateGOT(ELFObjectFile *Obj, Relocation &pReloc, bool pHasRel,
   uint8_t Reloc = llvm::ELF::R_RISCV_32;
   if (!B.config().targets().is32Bits())
     Reloc = llvm::ELF::R_RISCV_64;
+
+  // A non-default-visibility weak undefined symbol resolves to 0; no dynamic
+  // relocation needed.
+  if ((rsym->isHidden() || rsym->isProtected()) && rsym->isWeakUndef())
+    return *G;
+
   // If the symbol is not preemptible and we are not building an executable,
   // then try to use a relative reloc. We use a relative reloc if the symbol is
   // hidden otherwise.
@@ -440,9 +448,7 @@ void RISCVRelocator::scanRelocation(Relocation &pReloc, eld::IRBuilder &pLinker,
       }
     }
 
-    ELFSection *section = pSection.getLink()
-                              ? pSection.getLink()
-                              : pReloc.targetRef()->frag()->getOwningSection();
+    ELFSection *section = pSection.getLink();
 
     if (!section->isAlloc())
       return;
@@ -632,9 +638,7 @@ void RISCVRelocator::scanGlobalReloc(InputFile &pInputFile, Relocation &pReloc,
 
     // Absolute relocation type, symbol may needs PLT entry or
     // dynamic relocation entry
-    if ((isSymbolPreemptible ||
-         (config().options().isPatchEnable() && rsym->isPatchable())) &&
-        (rsym->type() == ResolveInfo::Function)) {
+    if ((isSymbolPreemptible) && (rsym->type() == ResolveInfo::Function)) {
       // create PLT for this symbol if it does not have.
       if (!(rsym->reserved() & ReservePLT)) {
         m_Target.createPLT(Obj, rsym);
@@ -697,8 +701,7 @@ void RISCVRelocator::scanGlobalReloc(InputFile &pInputFile, Relocation &pReloc,
     std::lock_guard<std::mutex> relocGuard(m_RelocMutex);
     if (rsym->reserved() & ReservePLT)
       return;
-    if ((!config().isCodeStatic() && ld_backend.isSymbolPreemptible(*rsym)) ||
-        (config().options().isPatchEnable() && rsym->isPatchable())) {
+    if (!config().isCodeStatic() && ld_backend.isSymbolPreemptible(*rsym)) {
       m_Target.createPLT(Obj, rsym);
       rsym->setReserved(rsym->reserved() | ReservePLT);
     }
@@ -877,20 +880,7 @@ RISCVRelocator::Result applyAbs(Relocation &pReloc, RISCVLDBackend &Backend,
   if (RelocDescs.count(pReloc.type()) == 0)
     return RISCVRelocator::Unsupport;
 
-  // Normally, relocations are resolved to the PLT if it exists for a symbol.
-  // However, relocations in the patch table must be resolved to the real
-  // symbol, otherwise, they will point to themselves.
-  bool IsPatchSection = (pReloc.type() == llvm::ELF::R_RISCV_32 ||
-                         pReloc.type() == llvm::ELF::R_RISCV_64) &&
-                        pReloc.targetRef()
-                            ->frag()
-                            ->getOwningSection()
-                            ->getInputFile()
-                            ->getInput()
-                            ->getAttribute()
-                            .isPatchBase();
-  uint64_t S = IsPatchSection ? pReloc.symValue(Backend.getModule())
-                              : Backend.getSymbolValuePLT(pReloc);
+  uint64_t S = Backend.getSymbolValuePLT(pReloc);
   uint64_t A = pReloc.addend();
   int64_t Result = S + A;
 
@@ -1069,15 +1059,7 @@ RISCVRelocator::Result applyJumpOrCall(Relocation &pReloc,
 
   // Normally, relocations are resolved to the PLT if it exists for a symbol.
   // Direct calls can be optimized to use the real symbol.
-  bool IsPatchSection = pReloc.targetRef()
-                            ->frag()
-                            ->getOwningSection()
-                            ->getInputFile()
-                            ->getInput()
-                            ->getAttribute()
-                            .isPatchBase();
-  int64_t S = IsPatchSection ? pReloc.symValue(Backend.getModule())
-                             : Backend.getSymbolValuePLT(pReloc);
+  int64_t S = Backend.getSymbolValuePLT(pReloc);
   int64_t A = pReloc.addend();
   int64_t P = pReloc.place(Backend.getModule());
 
@@ -1165,6 +1147,15 @@ RISCVRelocator::Result applyCompressedLUI(Relocation &pReloc,
                     Parent);
 }
 
+RISCVRelocator::Result applyCompressedLI(Relocation &pReloc,
+                                         RISCVLDBackend &Backend,
+                                         RISCVRelocator &Parent,
+                                         RelocationDescription &pRelocDesc) {
+  int64_t S = Backend.getSymbolValuePLT(pReloc);
+  int64_t A = pReloc.addend();
+  return ApplyReloc(pReloc, S + A, pRelocDesc, Backend.config(), Parent);
+}
+
 Relocator::Result unsupported(Relocation &pReloc, RISCVLDBackend &,
                               RISCVRelocator &,
                               RelocationDescription &pRelocDesc) {
@@ -1213,7 +1204,6 @@ void RISCVRelocator::handleScanForNonPreemptibleIFunc(Relocation &R,
     return;
 
   m_Target.createPLT(Obj, RI, /*isIRelative=*/true);
-  m_Target.defineIRelativeRange(*RI);
   RI->setReserved(RI->reserved() | Relocator::ReservePLT);
 }
 

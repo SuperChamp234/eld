@@ -79,9 +79,12 @@ x86_64LinkDriver::parseOptions(ArrayRef<const char *> Args,
                      /*ShowAllAliases=*/true);
     return LINK_SUCCESS;
   }
-  if (ArgList.hasArg(OPT_x86_64LinkOptTable::version)) {
-    printVersionInfo();
-    return LINK_SUCCESS;
+  if (llvm::opt::Arg *Arg = ArgList.getLastArg(
+          OPT_x86_64LinkOptTable::v, OPT_x86_64LinkOptTable::version)) {
+    if (Arg->getOption().matches(OPT_x86_64LinkOptTable::version)) {
+      printVersionInfo();
+      return LINK_SUCCESS;
+    }
   }
   // --about
   if (ArgList.hasArg(OPT_x86_64LinkOptTable::about)) {
@@ -96,6 +99,12 @@ x86_64LinkDriver::parseOptions(ArrayRef<const char *> Args,
 
   Config.options().setUnknownOptions(
       ArgList.getAllArgValues(OPT_x86_64LinkOptTable::UNKNOWN));
+
+  // --relax/--no-relax: enable/disable GOTPCRELX relaxation (disabled by
+  // default)
+  Config.options().setRelax(ArgList.hasFlag(OPT_x86_64LinkOptTable::relax,
+                                            OPT_x86_64LinkOptTable::no_relax,
+                                            /*default=*/false));
 
   return {};
 }

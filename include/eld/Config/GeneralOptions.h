@@ -58,8 +58,6 @@ public:
     StripAllSymbols
   };
 
-  enum class WarnMismatchMode { None, WarnMismatch, NoWarnMismatch };
-
   enum OrphanMode { Place, Warn, Error, Invalid };
 
   enum ErrorStyleType { gnu, llvm };
@@ -67,6 +65,8 @@ public:
   enum ScriptOptionType { MatchGNU, MatchLLVM };
 
   enum HashStyle { SystemV = 0x1, GNU = 0x2, Both = 0x3 };
+
+  enum class RISCVRelaxTbljalMode { None, Zcmt, Xqccmt };
 
   enum TraceType { T_Files = 0x1, T_Trampolines = 0x2, T_Symbols = 0x4 };
 
@@ -219,6 +219,10 @@ public:
 
   bool hasOutputFileName() const { return OutputFileName.has_value(); }
 
+  void setEmitOutputFile(bool Enable = true) { EmitOutputFile = Enable; }
+
+  bool shouldEmitOutputFile() { return EmitOutputFile; }
+
   void setVerbose(int8_t PVerbose = 1);
 
   void setColor(bool PEnabled = true) { BColor = PEnabled; }
@@ -339,6 +343,11 @@ public:
 
   bool warnSharedTextrel() const { return BWarnSharedTextrel; }
 
+  // --no-warn-rwx-segments
+  void setWarnRWXSegments(bool V = true) { BWarnRWXSegments = V; }
+
+  bool warnRWXSegments() const { return BWarnRWXSegments; }
+
   void setDefineCommon(bool PEnable = true) { BDefineCommon = PEnable; }
 
   bool isDefineCommon() const { return BDefineCommon; }
@@ -392,7 +401,7 @@ public:
 
   void setGCCref(std::string PSym) { GcCrefSym = PSym; }
 
-  // LTO Functions, -flto -flto-options
+  // LTO Functions, -flto --flto-options
   void setLTO(bool PLto = false) { Lto = PLto; }
 
   bool hasLTO() const { return Lto; }
@@ -481,25 +490,9 @@ public:
 
   bool printMap() const { return BPrintMap; }
 
-  void setWarnMismatch(bool PEnable) {
-    if (PEnable) {
-      WarnMismatch = WarnMismatchMode::WarnMismatch;
-      return;
-    }
-    WarnMismatch = WarnMismatchMode::NoWarnMismatch;
-  }
+  void setWarnMismatch(bool Enable) { WarnMismatch = Enable; }
 
-  bool hasOptionWarnNoWarnMismatch() const {
-    return (WarnMismatch != WarnMismatchMode::None);
-  }
-
-  bool noWarnMismatch() const {
-    return (WarnMismatch == WarnMismatchMode::NoWarnMismatch);
-  }
-
-  bool warnMismatch() const {
-    return (WarnMismatch == WarnMismatchMode::WarnMismatch);
-  }
+  bool warnMismatch() const { return WarnMismatch; }
 
   // --gc-sections
   void setGCSections(bool PEnable = true) { BGCSections = PEnable; }
@@ -612,6 +605,10 @@ public:
   // ---- remap input file names ---- //
   const RemapInputsType &getRemapInputs() const { return RemapInputs; }
   RemapInputsType &getRemapInputs() { return RemapInputs; }
+
+  /// Apply --remap-inputs rules to \p FileName (first match wins).
+  /// Returns the replacement path if a rule matched, or std::nullopt.
+  std::optional<std::string> findRemapInput(llvm::StringRef FileName) const;
 
   // ---- add extern symbols from list file ---- //
   const ExtList &getExternList() const { return ExternList; }
@@ -739,6 +736,10 @@ public:
   ScriptOptionType getScriptOption() const;
 
   bool setScriptOption(std::string ScriptOptions);
+
+  bool useOldRuleMatching() const { return BUseOldRuleMatching; }
+
+  void setUseOldRuleMatching(bool B) { BUseOldRuleMatching = B; }
 
   const SymbolRenameMap &renameMap() const { return SymbolRenames; }
   SymbolRenameMap &renameMap() { return SymbolRenames; }
@@ -928,6 +929,10 @@ public:
 
   bool getRISCVRelax() const { return BRiscvRelax; }
 
+  void setRelax(bool Value) { ShouldRelax = Value; }
+
+  bool getRelax() const { return ShouldRelax; }
+
   void setRISCVZeroRelax(bool Relax) { RiscvZeroRelax = Relax; }
 
   bool getRISCVZeroRelax() const { return RiscvZeroRelax; }
@@ -948,9 +953,25 @@ public:
 
   bool getRISCVRelaxTLSDESC() const { return BRiscvRelaxTLSDESC; }
 
-  void setRISCVRelaxTbljal(bool Value) { BRiscvRelaxTbljal = Value; }
+  void setRISCVRelaxTbljal(RISCVRelaxTbljalMode Mode) {
+    RiscvRelaxTbljal = Mode;
+  }
 
-  bool getRISCVRelaxTbljal() const { return BRiscvRelaxTbljal; }
+  bool getRISCVRelaxTbljal() const {
+    return RiscvRelaxTbljal != RISCVRelaxTbljalMode::None;
+  }
+
+  RISCVRelaxTbljalMode getRISCVRelaxTbljalMode() const {
+    return RiscvRelaxTbljal;
+  }
+
+  bool getRISCVRelaxTbljalToXqccmt() const {
+    return RiscvRelaxTbljal == RISCVRelaxTbljalMode::Xqccmt;
+  }
+
+  void setRISCVRelaxGOT(bool Value) { BRiscvRelaxGOT = Value; }
+
+  bool getRISCVRelaxGOT() const { return BRiscvRelaxGOT; }
 
   bool warnCommon() const { return BWarnCommon; }
 
@@ -970,9 +991,9 @@ public:
 
   void setRecordInputfiles() { RecordInputFiles = true; }
 
-  void setCompressTar() { CompressTar = true; }
+  void setCompressReproduceTar() { CompressReproduceTar = true; }
 
-  bool getCompressTar() const { return CompressTar; }
+  bool getCompressReproduceTar() const { return CompressReproduceTar; }
 
   void setHasMappingFile(bool HasMap) { HasMappingFile = HasMap; }
 
@@ -1177,13 +1198,6 @@ public:
 
   llvm::StringRef getBuildID() const { return BuildIDValue.value(); }
 
-  // --patch-enable support
-  void setPatchEnable() { PatchEnable = true; }
-  bool isPatchEnable() const { return PatchEnable; }
-
-  void setPatchBase(const std::string &Value) { PatchBase = Value; }
-  const std::optional<std::string> &getPatchBase() const { return PatchBase; }
-
   void setIgnoreUnknownOptions() { IgnoreUnknownOptions = true; }
 
   bool shouldIgnoreUnknownOptions() const { return IgnoreUnknownOptions; }
@@ -1239,6 +1253,7 @@ private:
   bool BStripDebug = false;        // -S, --strip-debug
   bool BExportDynamic = false;     //-E, --export-dynamic
   bool BWarnSharedTextrel = false; // --warn-shared-textrel
+  bool BWarnRWXSegments = true;    // --no-warn-rwx-segments
   bool BWarnCommon = false;        // --warn-common
   bool BDefineCommon = false;      // -d, -dc, -dp
   bool BFatalWarnings = false;     // --fatal-warnings
@@ -1247,8 +1262,8 @@ private:
   bool BLTOOptRemarksDisplayHotness = false; // --display-hotness-remarks
   bool BNoStdlib = false;                    // -nostdlib
   bool BPrintMap = false;                    // --print-map
-  WarnMismatchMode WarnMismatch =
-      WarnMismatchMode::None;        // --no{-warn}-mismatch
+  bool WarnMismatch = true;                  // --[no-]warn-mismatch
+  bool BUseOldRuleMatching = false;          // --use-old-rule-matching
   bool BGCSections = false;          // --gc-sections
   bool BPrintGCSections = false;     // --print-gc-sections
   bool BGenUnwindInfo = true;        // --ld-generated-unwind-info
@@ -1273,21 +1288,21 @@ private:
   uint32_t GPSize = 8;               // -G, --gpsize
   bool Lto = false;
   bool FatLTOObjects = false;                    // --fat-lto-objects
-  bool LTOUseAs = false;                         // -flto-use-as
+  bool LTOUseAs = false;                         // --flto-use-as
   StripSymbolMode StripSymbols = KeepAllSymbols; // Strip symbols ?
   bool BPageAlignSegments = true;   // Does the linker need to align segments to
                                     // a page.
   bool HasShared = false;           // -shared
   unsigned int HashStyle = SystemV; // HashStyle
-  bool Savetemps = false;           // -save-temps
-  std::optional<std::string> SaveTempsDir; // -save-temps=
+  bool Savetemps = false;           // --save-temps
+  std::optional<std::string> SaveTempsDir; // --save-temps=
   bool Rosegment = false; // merge read only with readonly/execute segments.
   SeparateSegmentKind SeparateSegments =
       SeparateSegmentKind::None; // -z separate-code
   std::optional<std::string> LTOObjPath; // --lto-obj-path=
   std::vector<std::string>
-      UnparsedLTOOptions;          // Unparsed -flto-options, to pass to plugin.
-  uint32_t LTOOptions = 0;         // -flto-options
+      UnparsedLTOOptions;  // Unparsed --flto-options, to pass to plugin.
+  uint32_t LTOOptions = 0; // --flto-options
   llvm::StringRef ThinLTOJobs;     // --thinlto-jobs=
   unsigned LTOPartitions = 1;      // --lto-partitions=
   bool Verify = true;              // Linker verifies output file.
@@ -1311,23 +1326,25 @@ private:
   bool DisableGuardForWeakUndefs = false; // hexagon specific option to
                                           // disable guard functionality.
   bool BRiscvRelax = true;                // enable riscv relaxation
+  bool ShouldRelax = false; // x86-64 GOTPCRELX relaxation (opt-in via --relax)
   bool RiscvZeroRelax = true;             // Zero-page relaxation
   bool RiscvGPRelax = true;               // GP relaxation
   bool BRiscvRelaxToC = true; // enable riscv relax to compressed code
   bool BRiscvRelaxXqci = false; // enable riscv relaxations for xqci
   bool BRiscvRelaxTLSDESC = true; // enable riscv relaxations for TLSDESC
-  bool BRiscvRelaxTbljal = false; // enable Zcmt table jump relaxation
+  RISCVRelaxTbljalMode RiscvRelaxTbljal =
+      RISCVRelaxTbljalMode::None; // enable Zcmt/Xqccmt table jump relaxation
+  bool BRiscvRelaxGOT = true;     // enable RISC-V GOT load relaxations
   bool AllowIncompatibleSectionsMix = false; // Allow incompatibleSections;
   bool ProgressBar = false;                  // Show progressbar.
   bool RecordInputFiles = false;             // --reproduce
   bool RecordInputFilesOnFail = false;       // --reproduce-on-fail
-  // FIXME: Change the name to CompressReproduceTar
-  bool CompressTar = false;         // --reproduce-compressed
+  bool CompressReproduceTar = false;         // --reproduce-compressed
   bool DisplaySummary = false;      // display linker run summary
   bool HasMappingFile = false;      // --Mapping-file
   bool DumpMappings = false;        // --Dump-Mapping-file
   bool DumpResponse = false;        // --Dump-Response-file
-  bool InsertTimingStats = false;        // -emit-timing-stats-in-output
+  bool InsertTimingStats = false;   // --emit-timing-stats-in-output
   bool FatalInternalErrors = false;      // --fatal-internal-errors
   bool EnableLinkerVersionDirective = false; // --enable/disable-linker-version
   bool RecordCommandLine = false;            // --{no-,}record-command-line
@@ -1414,13 +1431,12 @@ private:
   std::vector<llvm::Regex> RelaxSections;
   bool BuildID = false;
   std::optional<llvm::StringRef> BuildIDValue;
-  bool PatchEnable = false;
-  std::optional<std::string> PatchBase;
   bool IgnoreUnknownOptions = false;
   std::vector<std::string> UnknownOptions;
   std::string LinkLaunchDirectory;
   bool ShowRMSectNameInDiag = false;
   bool UseDefaultPlugins = true;
+  bool EmitOutputFile = true;
 };
 
 } // namespace eld

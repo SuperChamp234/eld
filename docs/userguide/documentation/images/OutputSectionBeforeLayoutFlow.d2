@@ -1,0 +1,18 @@
+...@common.d2
+
+direction: down
+
+"Initialize plugin".class: phase
+"Process input\nsections".class: phase
+"UserPlugin::Init(...)".class: callback
+"call UserPlugin::ProcessOutputSection(...)\nfor each output\nsection".class: callback
+"UserPlugin::Run(...)".class: callback
+"UserPlugin::Destroy(...)".class: callback
+"Merge input sections\nbased on rules and\ncreate missing output\nsections".class: phase
+
+"Initialize plugin" -> "Process input\nsections": { class: flow }
+"Process input\nsections" -> "UserPlugin::Init(...)": { class: flow }
+"UserPlugin::Init(...)" -> "call UserPlugin::ProcessOutputSection(...)\nfor each output\nsection": { class: flow }
+"call UserPlugin::ProcessOutputSection(...)\nfor each output\nsection" -> "UserPlugin::Run(...)": { class: flow }
+"UserPlugin::Run(...)" -> "UserPlugin::Destroy(...)": { class: flow }
+"UserPlugin::Destroy(...)" -> "Merge input sections\nbased on rules and\ncreate missing output\nsections": { class: flow }

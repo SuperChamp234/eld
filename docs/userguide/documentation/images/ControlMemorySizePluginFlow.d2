@@ -1,0 +1,16 @@
+...@common.d2
+
+direction: right
+
+"Creating\noutput\nsections".class: phase
+"UserPlugin::\nInit".class: callback
+"UserPlugin::\nAddBlocks".class: callback
+"UserPlugin::\nRun".class: callback
+"UserPlugin::\nDestroy".class: callback
+"Finalize output\nimage layout".class: phase
+
+"Creating\noutput\nsections" -> "UserPlugin::\nInit": { class: flow }
+"UserPlugin::\nInit" -> "UserPlugin::\nAddBlocks": { class: flow }
+"UserPlugin::\nAddBlocks" -> "UserPlugin::\nRun": { class: flow }
+"UserPlugin::\nRun" -> "UserPlugin::\nDestroy": { class: flow }
+"UserPlugin::\nDestroy" -> "Finalize output\nimage layout": { class: flow }

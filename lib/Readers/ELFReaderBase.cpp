@@ -111,10 +111,7 @@ ResolveInfo::Desc ELFReaderBase::getSymbolDesc(const GNULDBackend &backend,
       (binding != llvm::ELF::STB_LOCAL &&
        (ObjFile->getELFSection(shndx)->isIgnore() ||
         ObjFile->getELFSection(shndx)->isDiscard()))) {
-    // Sections of patch-base symbols are not loaded, but the symbols will be
-    // converted to absolute later in IRBuilder::addSymbol.
-    if (!inputFile.getInput()->getAttribute().isPatchBase())
-      return ResolveInfo::Undefined;
+    return ResolveInfo::Undefined;
   }
 
   return ResolveInfo::Define;
@@ -232,5 +229,6 @@ ELFReaderBase::inspectELFKind(const InputFile &I) {
 // FIXME: Move ELFRelocObjParser::readSections to RelocELFReader::readSections
 eld::Expected<void> ELFReaderBase::readSections() {
   ASSERT(0, "readSections must only be called for shared object files.");
+  return {};
 }
 #endif
