@@ -1,0 +1,58 @@
+name: pico-sdk builder
+
+on:
+  pull_request: {}
+  workflow_run:
+    workflows: ['Nightly check']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      use_nightly_toolchain:
+        description: Use the latest successful nightly LLVM/ELD artifact
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    name: ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [rp2040, rp2350-arm, rp2350-riscv]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Clang 20
+        uses: egor-tensin/setup-clang@v1
+        with:
+          version: '20'
+          platform: x64
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake git libc++-dev libc++abi-dev make meson ninja-build pkg-config python3 python3-pip
+      - name: Fetch nightly LLVM/ELD toolchain
+        if: github.event_name == 'workflow_run' || inputs.use_nightly_toolchain
+        uses: ./.github/workflows/FetchNightlyToolset
+      - name: Build pico-sdk with ELD
+        env:
+          USE_NIGHTLY_TOOLCHAIN: ${{ github.event_name == 'workflow_run' || inputs.use_nightly_toolchain }}
+        run: |
+          toolchain_args=()
+          if [[ "${USE_NIGHTLY_TOOLCHAIN}" == true ]]; then
+            toolchain_args=(--toolchain "${GITHUB_WORKSPACE}/inst")
+          fi
+          scripts/build-pico-sdk.sh --arch '${{ matrix.arch }}' --work-dir "${RUNNER_TEMP}/pico-sdk-build" "${toolchain_args[@]}"
+      - name: Upload ELF artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-sdk-elfs-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pico-sdk-build/artifacts/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 30

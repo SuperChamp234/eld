@@ -246,6 +246,13 @@ jobs:
           bash "${SCRIPTS_DIR}/BundleSharedLibDeps.sh" \
             "${{ github.workspace }}/eld-unstable" \
             ld.eld
+      - name: Record nightly toolchain source revisions
+        shell: bash
+        run: |
+          git -C "${{ github.workspace }}/llvm-project" rev-parse HEAD \
+            > "${{ github.workspace }}/install-nightly-toolchain/LLVM_REVISION"
+          git -C "${{ github.workspace }}/llvm-project/llvm/tools/eld" rev-parse HEAD \
+            > "${{ github.workspace }}/install-nightly-toolchain/ELD_REVISION"
       - name: Pack toolchain tarball
         run: |
           tar -C ${{ github.workspace }}/ \
