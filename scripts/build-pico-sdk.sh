@@ -59,7 +59,7 @@ if [[ -n "${TOOLCHAIN_DIR}" ]]; then
   fi
 fi
 
-for tool in git cmake ninja meson clang clang++ llvm-ar llvm-nm llvm-ranlib; do
+for tool in git cmake ninja meson clang clang++; do
   command -v "${tool}" >/dev/null || { echo "Missing required tool: ${tool}" >&2; exit 1; }
 done
 
